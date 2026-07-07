@@ -393,20 +393,45 @@ function addDaysStr(dateStr, n) {
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
-/* Count COMPLETED payments (never CANCELED/FAILED/APPROVED) across the
-   trading-day range, following pagination. Refunds are separate records in
-   Square's API and never touch this count, so they can't reduce it. */
+async function squareLocationIds(env) {
+  const data = await squareFetch(env, '/v2/locations');
+  return ((data && data.locations) || []).map((l) => l.id).filter(Boolean);
+}
+
+/* Count COMPLETED orders (not individual payments) across the trading-day
+   range, closed within that window, following pagination.
+   NOTE (found during reconciliation): counting /v2/payments directly
+   over-counts split-tender sales (part card, part cash creates two payment
+   records for one sale). Square's own reporting counts by order - one
+   ticket, one transaction - so this counts orders instead. Refunds are
+   separate records that never touch this count either way. */
 async function squareCountCompleted(env, from, to, tz, rollover) {
   const beginTime = localBoundaryToUtcIso(from, rollover || 0, tz || 'Australia/Sydney');
   const endTime = localBoundaryToUtcIso(addDaysStr(to, 1), rollover || 0, tz || 'Australia/Sydney');
+  const locationIds = await squareLocationIds(env);
+  if (!locationIds.length) return 0;
   let count = 0, cursor = null;
   do {
-    const params = { begin_time: beginTime, end_time: endTime, sort_order: 'ASC', limit: '100' };
-    if (cursor) params.cursor = cursor;
-    const data = await squareFetch(env, '/v2/payments', params);
-    for (const p of (data && data.payments) || []) {
-      if (p.status === 'COMPLETED') count++;
-    }
+    const body = {
+      location_ids: locationIds,
+      query: {
+        filter: {
+          state_filter: { states: ['COMPLETED'] },
+          date_time_filter: { closed_at: { start_at: beginTime, end_at: endTime } }
+        }
+      },
+      limit: 500,
+      return_entries: true
+    };
+    if (cursor) body.cursor = cursor;
+    const res = await fetch(SQUARE_BASE + '/v2/orders/search', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + (env.POS_API_TOKEN || ''), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+    const data = await res.json();
+    count += ((data && data.order_entries) || []).length;
     cursor = (data && data.cursor) || null;
   } while (cursor);
   return count;
