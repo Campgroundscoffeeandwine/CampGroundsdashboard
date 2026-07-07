@@ -79,22 +79,34 @@ const ADAPTERS = {
      'Demo Company'. Secrets: ACCOUNTING_CLIENT_ID, ACCOUNTING_CLIENT_SECRET.
   */
   accounting: {
-    configured: false,
-    auth: null, /* 'oauth' | 'token' */
+    configured: true,
+    auth: 'oauth',
     oauth: {
-      /* Example (Xero) - fill these when you wire the adapter:
-         authorizeUrl: 'https://login.xero.com/identity/connect/authorize',
-         tokenUrl: 'https://identity.xero.com/connect/token',
-         scopes: 'offline_access accounting.reports.profitandloss.read',
-         clientIdSecret: 'ACCOUNTING_CLIENT_ID',
-         clientSecretSecret: 'ACCOUNTING_CLIENT_SECRET',
-         tokenAuth: 'basic'   // Xero's token endpoint wants HTTP Basic client auth
-                              // (client_secret_basic). Use 'post' only for providers
-                              // that expect client_id/secret in the form body. */
+      authorizeUrl: 'https://login.xero.com/identity/connect/authorize',
+      tokenUrl: 'https://identity.xero.com/connect/token',
+      scopes: 'offline_access accounting.reports.profitandloss.read',
+      clientIdSecret: 'ACCOUNTING_CLIENT_ID',
+      clientSecretSecret: 'ACCOUNTING_CLIENT_SECRET',
+      tokenAuth: 'basic'   // Xero's token endpoint wants HTTP Basic client auth
+                            // (client_secret_basic), not the form body.
     },
-    async status(env, h) { return { connected: false }; },
-    async fetchRange(env, h, q) { throw new NotConfigured('accounting'); },
-    async fetchMonthly(env, h, q) { throw new NotConfigured('accounting'); }
+    async status(env, h) {
+      const tokens = await h.getTokens();
+      if (!tokens) return { connected: false };
+      try {
+        const tenant = await xeroTenant(env, h);
+        return { connected: true, org: tenant.tenantName, sandbox: tenant.sandbox };
+      } catch (e) {
+        return { connected: false };
+      }
+    },
+    async fetchRange(env, h, q) {
+      const data = await xeroPnl(env, h, q.from, q.to, null);
+      return parsePnlSinglePeriod(data);
+    },
+    async fetchMonthly(env, h, q) {
+      return xeroMonthly(env, h, q.fromMonth, q.toMonth);
+    }
   },
 
   /* >>> ADAPTER 2: POS
@@ -137,6 +149,187 @@ const ADAPTERS = {
     async fetchMonthly(env, h, q) { return { months: [], cost: [] }; }
   }
 };
+
+/* ----------------------------------------------------------------------------
+   Xero-specific helpers (accounting adapter). Kept here, right after the
+   adapters, since they are part of wiring ADAPTER 1 - not shell plumbing.
+   Report shape and field mapping verified against capability-matrix.md
+   (June 2026). Re-verify against developer.xero.com if Xero's report JSON
+   shape ever changes.
+---------------------------------------------------------------------------- */
+
+const XERO_WAGE_KEYWORDS = /wages|salaries|superannuation|super|payroll|annual leave|long service|workcover/i;
+
+/* Resolve (and cache in the stored tokens) which Xero organisation this
+   connection is for. /connections is tenant-agnostic (no Xero-Tenant-Id
+   header needed); every report call after this needs that tenantId. */
+async function xeroTenant(env, h) {
+  const cached = await h.getTokens();
+  if (cached && cached.tenantId) {
+    return { tenantId: cached.tenantId, tenantName: cached.tenantName, sandbox: /demo company/i.test(cached.tenantName || '') };
+  }
+  const conns = await h.fetchJson('https://api.xero.com/connections', {}, {});
+  if (!Array.isArray(conns) || !conns.length) {
+    const e = new Error('no Xero organisation connected'); e.status = 401; throw e;
+  }
+  const tenant = conns[0];
+  const t = await h.getTokens();
+  if (t) { t.tenantId = tenant.tenantId; t.tenantName = tenant.tenantName; await h.saveTokens(t); }
+  return { tenantId: tenant.tenantId, tenantName: tenant.tenantName, sandbox: /demo company/i.test(tenant.tenantName || '') };
+}
+
+/* One P&L call. fromDate/toDate = 'YYYY-MM-DD'. extra can add
+   { timeframe: 'MONTH', periods: '<=11' } for a multi-period pull
+   (Xero caps periods at 11 prior + the current = 12 columns per call). */
+async function xeroPnl(env, h, fromDate, toDate, extra) {
+  const tenant = await xeroTenant(env, h);
+  const params = new URLSearchParams({ fromDate, toDate });
+  if (extra) for (const [k, v] of Object.entries(extra)) params.set(k, v);
+  return h.fetchJson('https://api.xero.com/api.xro/2.0/Reports/ProfitAndLoss?' + params.toString(), {
+    headers: { 'Xero-Tenant-Id': tenant.tenantId, 'Accept': 'application/json' }
+  }, {});
+}
+
+function xeroFindSection(rows, matchTitle) {
+  for (const row of rows || []) {
+    if (row.RowType === 'Section' && matchTitle((row.Title || '').trim())) return row;
+  }
+  return null;
+}
+/* Section total = its own SummaryRow (e.g. "Total Income"); falls back to
+   summing plain Rows if a report ever omits the SummaryRow. */
+function xeroSectionTotal(section, colIndex) {
+  if (!section) return 0;
+  const i = colIndex || 1;
+  const summary = (section.Rows || []).find((r) => r.RowType === 'SummaryRow');
+  if (summary && summary.Cells && summary.Cells[i]) return parseFloat(summary.Cells[i].Value) || 0;
+  return (section.Rows || []).filter((r) => r.RowType === 'Row')
+    .reduce((sum, r) => sum + ((r.Cells && r.Cells[i] && parseFloat(r.Cells[i].Value)) || 0), 0);
+}
+/* Sum only the lines inside Operating Expenses whose label matches the wage
+   keyword list - proposed here, CONFIRMED with the owner during
+   reconciliation (kpi-spec.md, capability-matrix.md). */
+function xeroWageSuperTotal(section, colIndex) {
+  if (!section) return 0;
+  const i = colIndex || 1;
+  let sum = 0;
+  for (const row of section.Rows || []) {
+    if (row.RowType === 'Row' && row.Cells && row.Cells[0] && XERO_WAGE_KEYWORDS.test(row.Cells[0].Value || '')) {
+      sum += parseFloat(row.Cells[i] && row.Cells[i].Value) || 0;
+    }
+  }
+  return sum;
+}
+function xeroSections(rows) {
+  return {
+    income: xeroFindSection(rows, (t) => /^income$/i.test(t) || /^trading income$/i.test(t)),
+    cos: xeroFindSection(rows, (t) => /cost of sales/i.test(t)),
+    opex: xeroFindSection(rows, (t) => /operating expenses/i.test(t) || /^expenses$/i.test(t))
+  };
+}
+
+/* Single fromDate..toDate call (no timeframe/periods) -> exactly one amount
+   column (Cells[1]). Used for cur/prev/yoy period slots. */
+function parsePnlSinglePeriod(reportJson) {
+  const rows = (reportJson.Reports && reportJson.Reports[0] && reportJson.Reports[0].Rows) || [];
+  const s = xeroSections(rows);
+  const revenue = xeroSectionTotal(s.income, 1);
+  const cogs = xeroSectionTotal(s.cos, 1);
+  const opexTotal = xeroSectionTotal(s.opex, 1);
+  const wagesSuper = xeroWageSuperTotal(s.opex, 1);
+  return { revenue, cogs, wagesSuper, overheads: opexTotal - wagesSuper };
+}
+
+/* Xero prints period-column headers like "31 Mar 2026" (or a 2-digit year) -
+   parse to 'YYYY-MM' so columns are matched by the date they actually
+   represent, never assumed by position/order. */
+function xeroParsePeriodLabel(label) {
+  const m = /^(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{2,4})$/.exec((label || '').trim());
+  if (!m) return null;
+  const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  const mo = MONTHS[m[2].slice(0, 3).toLowerCase()];
+  if (!mo) return null;
+  let year = parseInt(m[3], 10);
+  if (year < 100) year += 2000;
+  return year + '-' + String(mo).padStart(2, '0');
+}
+
+/* Multi-period call (timeframe=MONTH&periods=N) -> one column per month;
+   map every column to its real month via the Header row, not by position. */
+function parsePnlMultiPeriod(reportJson) {
+  const rows = (reportJson.Reports && reportJson.Reports[0] && reportJson.Reports[0].Rows) || [];
+  const header = rows.find((r) => r.RowType === 'Header');
+  const monthCols = {}; /* colIndex -> 'YYYY-MM' */
+  if (header && header.Cells) {
+    header.Cells.forEach((c, i) => {
+      if (i === 0) return;
+      const mo = xeroParsePeriodLabel(c.Value);
+      if (mo) monthCols[i] = mo;
+    });
+  }
+  const s = xeroSections(rows);
+  function seriesFor(section, wageOnly) {
+    const out = {};
+    if (!section) return out;
+    if (wageOnly) {
+      for (const row of section.Rows || []) {
+        if (row.RowType === 'Row' && row.Cells && XERO_WAGE_KEYWORDS.test(row.Cells[0].Value || '')) {
+          row.Cells.forEach((c, i) => {
+            const mo = monthCols[i]; if (!mo) return;
+            out[mo] = (out[mo] || 0) + (parseFloat(c.Value) || 0);
+          });
+        }
+      }
+    } else {
+      const summary = (section.Rows || []).find((r) => r.RowType === 'SummaryRow');
+      if (summary && summary.Cells) {
+        summary.Cells.forEach((c, i) => {
+          const mo = monthCols[i]; if (!mo) return;
+          out[mo] = parseFloat(c.Value) || 0;
+        });
+      }
+    }
+    return out;
+  }
+  return {
+    revenueByMo: seriesFor(s.income, false),
+    cogsByMo: seriesFor(s.cos, false),
+    opexByMo: seriesFor(s.opex, false),
+    wageByMo: seriesFor(s.opex, true)
+  };
+}
+
+/* Chunk a YYYY-MM..YYYY-MM range into <=12-month calls (Xero's periods param
+   is capped at 11 prior periods + the current), then stitch the results. */
+async function xeroMonthly(env, h, fromMonth, toMonth) {
+  const months = monthList(fromMonth, toMonth);
+  const revenue = {}, cogs = {}, wagesSuper = {}, overheads = {};
+  for (let i = 0; i < months.length; i += 12) {
+    const chunk = months.slice(i, i + 12);
+    const toMo = chunk[chunk.length - 1];
+    const [ty, tm] = toMo.split('-').map(Number);
+    const lastDay = new Date(Date.UTC(ty, tm, 0)).getUTCDate();
+    const toDate = toMo + '-' + String(lastDay).padStart(2, '0');
+    const fromDate = chunk[0] + '-01';
+    const data = await xeroPnl(env, h, fromDate, toDate, { timeframe: 'MONTH', periods: String(chunk.length - 1) });
+    const parsed = parsePnlMultiPeriod(data);
+    for (const mo of chunk) {
+      const opexTotal = parsed.opexByMo[mo];
+      const wage = parsed.wageByMo[mo] || 0;
+      revenue[mo] = mo in parsed.revenueByMo ? parsed.revenueByMo[mo] : null;
+      cogs[mo] = mo in parsed.cogsByMo ? parsed.cogsByMo[mo] : null;
+      wagesSuper[mo] = opexTotal != null ? wage : null;
+      overheads[mo] = opexTotal != null ? (opexTotal - wage) : null;
+    }
+  }
+  return {
+    months,
+    revenue: months.map((mo) => (mo in revenue ? revenue[mo] : null)),
+    cogs: months.map((mo) => (mo in cogs ? cogs[mo] : null)),
+    wagesSuper: months.map((mo) => (mo in wagesSuper ? wagesSuper[mo] : null)),
+    overheads: months.map((mo) => (mo in overheads ? overheads[mo] : null))
+  };
+}
 
 /* ============================================================================
    Everything below is the shell. You should rarely need to edit it.
