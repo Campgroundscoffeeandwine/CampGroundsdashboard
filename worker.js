@@ -123,12 +123,30 @@ const ADAPTERS = {
      connect.squareupsandbox.com.
   */
   pos: {
-    configured: false,
-    auth: null,
+    configured: true,
+    auth: 'token', /* pasted production personal access token - no OAuth dance */
     oauth: {},
-    async status(env, h) { return { connected: false }; },
-    async fetchRange(env, h, q) { throw new NotConfigured('pos'); },
-    async fetchMonthly(env, h, q) { throw new NotConfigured('pos'); }
+    async status(env, h) {
+      if (!env.POS_API_TOKEN) return { connected: false };
+      const data = await squareFetch(env, '/v2/locations');
+      const locs = (data && data.locations) || [];
+      const names = locs.map((l) => l.name).filter(Boolean);
+      return { connected: true, org: names.join(', ') || null, sandbox: false };
+    },
+    async fetchRange(env, h, q) {
+      return { count: await squareCountCompleted(env, q.from, q.to, q.tz, q.rollover) };
+    },
+    async fetchMonthly(env, h, q) {
+      const months = monthList(q.fromMonth, q.toMonth);
+      const counts = [];
+      for (const mo of months) {
+        const [y, m] = mo.split('-').map(Number);
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const from = mo + '-01', to = mo + '-' + String(lastDay).padStart(2, '0');
+        counts.push(await squareCountCompleted(env, from, to, q.tz, q.rollover));
+      }
+      return { months, count: counts };
+    }
   },
 
   /* >>> ADAPTER 3: ROSTERING (optional - only if the owner has one)
@@ -329,6 +347,69 @@ async function xeroMonthly(env, h, fromMonth, toMonth) {
     wagesSuper: months.map((mo) => (mo in wagesSuper ? wagesSuper[mo] : null)),
     overheads: months.map((mo) => (mo in overheads ? overheads[mo] : null))
   };
+}
+
+/* ----------------------------------------------------------------------------
+   Square-specific helpers (pos adapter). Production host only - a token
+   pasted from the Developer Console's Sandbox side will simply 401 here,
+   which is the intended signal (see capability-matrix.md: sandbox vs
+   production is the trap). Square-Version header is deliberately omitted so
+   requests use the app's own pinned default version instead of a hardcoded
+   date that will eventually go stale.
+---------------------------------------------------------------------------- */
+
+const SQUARE_BASE = 'https://connect.squareup.com';
+
+async function squareFetch(env, path, params) {
+  const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+  const res = await fetch(SQUARE_BASE + path + qs, {
+    headers: { 'Authorization': 'Bearer ' + (env.POS_API_TOKEN || ''), 'Content-Type': 'application/json' }
+  });
+  if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+  return res.json();
+}
+
+/* Offset (minutes) of `tz` at the instant `date`, via an Intl round-trip. */
+function tzOffsetMinutes(date, tz) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+  const p = {};
+  for (const part of dtf.formatToParts(date)) p[part.type] = part.value;
+  const asUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second));
+  return (asUtc - date.getTime()) / 60000;
+}
+/* 'YYYY-MM-DD' + a trading-day rollover hour, in the venue's timezone -> a
+   UTC ISO instant. One correction pass against the actual local offset;
+   accurate except at the instant of a DST switch itself. */
+function localBoundaryToUtcIso(dateStr, hour, tz) {
+  const guess = new Date(dateStr + 'T' + String(hour).padStart(2, '0') + ':00:00Z');
+  const offsetMin = tzOffsetMinutes(guess, tz);
+  return new Date(guess.getTime() - offsetMin * 60000).toISOString();
+}
+function addDaysStr(dateStr, n) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+/* Count COMPLETED payments (never CANCELED/FAILED/APPROVED) across the
+   trading-day range, following pagination. Refunds are separate records in
+   Square's API and never touch this count, so they can't reduce it. */
+async function squareCountCompleted(env, from, to, tz, rollover) {
+  const beginTime = localBoundaryToUtcIso(from, rollover || 0, tz || 'Australia/Sydney');
+  const endTime = localBoundaryToUtcIso(addDaysStr(to, 1), rollover || 0, tz || 'Australia/Sydney');
+  let count = 0, cursor = null;
+  do {
+    const params = { begin_time: beginTime, end_time: endTime, sort_order: 'ASC', limit: '100' };
+    if (cursor) params.cursor = cursor;
+    const data = await squareFetch(env, '/v2/payments', params);
+    for (const p of (data && data.payments) || []) {
+      if (p.status === 'COMPLETED') count++;
+    }
+    cursor = (data && data.cursor) || null;
+  } while (cursor);
+  return count;
 }
 
 /* ============================================================================
