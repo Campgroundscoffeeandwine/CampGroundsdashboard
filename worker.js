@@ -420,8 +420,9 @@ async function squareCountCompleted(env, from, to, tz, rollover) {
           date_time_filter: { closed_at: { start_at: beginTime, end_at: endTime } }
         }
       },
-      limit: 500,
-      return_entries: true
+      limit: 500
+      /* full orders requested (return_entries omitted) so total_money is
+         present - needed to exclude zero-net-sale orders below. */
     };
     if (cursor) body.cursor = cursor;
     const res = await fetch(SQUARE_BASE + '/v2/orders/search', {
@@ -431,7 +432,12 @@ async function squareCountCompleted(env, from, to, tz, rollover) {
     });
     if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
     const data = await res.json();
-    count += ((data && data.order_entries) || []).length;
+    for (const o of (data && data.orders) || []) {
+      /* Reconciliation finding: Square's own transaction count ties to net
+         sales - a completed order comped or refunded down to zero doesn't
+         count. Mirror that here rather than counting every COMPLETED order. */
+      if (o.total_money && typeof o.total_money.amount === 'number' && o.total_money.amount > 0) count++;
+    }
     cursor = (data && data.cursor) || null;
   } while (cursor);
   return count;
