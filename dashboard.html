@@ -900,7 +900,54 @@ function renderDashboard(root) {
   CHOSEN.forEach(function (k) { grid.appendChild(metricCard(k, cur, prev, yoy, r)); });
   root.appendChild(grid);
 
+  renderTaxSetAside(root, cur, r);
   renderBudgetSection(root);
+}
+
+/* Rough estimate, not a locked kpi-spec metric: what to set aside for BAS
+   and PAYG, scaled to whichever period is on screen. BAS scales with actual
+   revenue for the period; PAYG is the owner's own running average, prorated
+   by the period's length against an average month. This tracks a TARGET to
+   set aside - the dashboard has no bank connection, so it can't see whether
+   the money actually got moved. Rates are set once here; ask your AI to
+   change them if the owner's PAYG average or BAS rate changes. */
+var TAX_SETASIDE = { basRatePct: 10, paygMonthly: 4800 };
+function renderTaxSetAside(root, cur, r) {
+  if (isManual() || !isConfigured('accounting') || cur.revenue == null) return;
+  var days = Math.max(1, Math.round((r.to - r.from) / 86400000) + 1);
+  var monthFactor = days / 30.44;
+  var bas = cur.revenue * (TAX_SETASIDE.basRatePct / 100);
+  var payg = TAX_SETASIDE.paygMonthly * monthFactor;
+  var sec = el('div', 'budget-section');
+  var title = el('div', 'section-title');
+  title.innerHTML = 'Set aside for tax <span class="m-tag tag-proj" style="margin-left:8px">Estimate</span>';
+  sec.appendChild(title);
+  var sub = el('div', 'm-sub', 'A target to put aside for ' + esc(periodLabel().toLowerCase()) + ' - not a live balance, just what to transfer.');
+  sub.style.marginBottom = '0.6rem';
+  sec.appendChild(sub);
+  var wrap = el('div', 'budget-table-wrap');
+  var tbl = el('table', 'budget-table');
+  var thead = el('tr');
+  ['What for', 'Rate', 'Set aside this period'].forEach(function (h) { thead.appendChild(el('th', null, esc(h))); });
+  tbl.appendChild(thead);
+  var r1 = el('tr');
+  r1.appendChild(el('td', null, 'BAS (GST)'));
+  r1.appendChild(el('td', 'num', TAX_SETASIDE.basRatePct + '% of revenue'));
+  r1.appendChild(el('td', 'num', fmtMoney(bas)));
+  tbl.appendChild(r1);
+  var r2 = el('tr');
+  r2.appendChild(el('td', null, 'PAYG withholding'));
+  r2.appendChild(el('td', 'num', fmtMoney(TAX_SETASIDE.paygMonthly) + '/month avg'));
+  r2.appendChild(el('td', 'num', fmtMoney(payg)));
+  tbl.appendChild(r2);
+  var r3 = el('tr');
+  r3.appendChild(el('td', null, el('b', null, 'Total to set aside').outerHTML));
+  r3.appendChild(el('td', 'num', ''));
+  r3.appendChild(el('td', 'num', el('b', null, fmtMoney(bas + payg)).outerHTML));
+  tbl.appendChild(r3);
+  wrap.appendChild(tbl);
+  sec.appendChild(wrap);
+  root.appendChild(sec);
 }
 
 /* ---------- Budget projection (additional section - kpi-spec.md's locked
