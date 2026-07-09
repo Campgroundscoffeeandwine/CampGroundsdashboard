@@ -593,10 +593,17 @@ function xeroBudgetColumnMap(reportJson, months) {
   return mapping;
 }
 
-/* One call gets the whole financial year (12 months forward from fyStart,
-   'YYYY-MM'), every account line, Actual+Budget per month - not just a
-   month/YTD summary. periods is capped at 11 prior + current = 12, which is
-   exactly one FY, so this never needs to chunk across calls. */
+/* One call PER MONTH (12 total) rather than one call for the whole year.
+   Reconciliation finding: a single date+periods=11+timeframe=1 call was
+   silently truncating partway through the year (Xero appears to cap how
+   many Actual+Budget column-pairs a single BudgetSummary call returns, or
+   returns a variable number of columns per period once the report crosses
+   from months with actuals into future budget-only months - either way the
+   simple 2-columns-per-period assumption broke down past a certain point).
+   Requesting one month at a time removes that ambiguity entirely: each call
+   has at most one period to find Actual/Budget columns for, via the same
+   header-label matching (xeroBudgetColumnMap with a single-month list).
+   12 calls easily clears Xero's 60/min, 1000/day Starter-tier limits. */
 async function xeroBudgetForFY(env, h, fyStartMonth) {
   const months = [];
   let [y, m] = fyStartMonth.split('-').map(Number);
@@ -604,37 +611,52 @@ async function xeroBudgetForFY(env, h, fyStartMonth) {
     months.push(y + '-' + String(m).padStart(2, '0'));
     m++; if (m > 12) { m = 1; y++; }
   }
-  const data = await xeroBudgetSummary(env, h, fyStartMonth + '-01', 11);
-  const rows = (data.Reports && data.Reports[0] && data.Reports[0].Rows) || [];
-  const flat = [];
-  xeroFlattenBudgetRows(rows, '', flat);
-  const colMap = xeroBudgetColumnMap(data, months);
-  const colByMonth = {};
-  colMap.forEach((c) => { colByMonth[c.month] = c; });
 
   const sectionLabels = { income: 'Income', cos: 'Cost of Sales', opex: 'Operating Expenses' };
-  const bySection = { income: [], cos: [], opex: [] };
-  for (const r of flat) {
-    const monthly = months.map((mo) => {
-      const cm = colByMonth[mo];
-      return {
-        actual: cm && cm.actualCol != null ? (parseFloat(r.cells[cm.actualCol] && r.cells[cm.actualCol].Value) || 0) : null,
-        budget: cm && cm.budgetCol != null ? (parseFloat(r.cells[cm.budgetCol] && r.cells[cm.budgetCol].Value) || 0) : null
+  const bySection = { income: {}, cos: {}, opex: {} }; /* key -> { name, monthly[] } */
+  months.forEach(() => {}); /* (monthly arrays are pre-sized below once we know the index) */
+  let lastDebug = null;
+
+  const perMonth = await Promise.all(months.map(async (mo, idx) => {
+    const data = await xeroBudgetSummary(env, h, mo + '-01', 1);
+    const rows = (data.Reports && data.Reports[0] && data.Reports[0].Rows) || [];
+    const flat = [];
+    xeroFlattenBudgetRows(rows, '', flat);
+    const colMap = xeroBudgetColumnMap(data, [mo]);
+    const cm = colMap[0];
+    const header = rows.find((rr) => rr.RowType === 'Header');
+    return {
+      idx,
+      flat,
+      cm,
+      debug: {
+        reportName: (data.Reports && data.Reports[0] && data.Reports[0].ReportName) || null,
+        sampleMonth: mo,
+        topRowTypes: rows.map((rr) => rr.RowType + (rr.Title ? (':' + rr.Title) : '')),
+        headerLabels: ((header && header.Cells) || []).map((c) => c.Value),
+        flatRowCount: flat.length
+      }
+    };
+  }));
+
+  for (const result of perMonth) {
+    lastDebug = result.debug;
+    for (const r of result.flat) {
+      const key = r.section + '|' + r.name;
+      if (!bySection[r.section][key]) {
+        bySection[r.section][key] = { name: r.name, monthly: months.map(() => ({ actual: null, budget: null })) };
+      }
+      bySection[r.section][key].monthly[result.idx] = {
+        actual: result.cm && result.cm.actualCol != null ? (parseFloat(r.cells[result.cm.actualCol] && r.cells[result.cm.actualCol].Value) || 0) : null,
+        budget: result.cm && result.cm.budgetCol != null ? (parseFloat(r.cells[result.cm.budgetCol] && r.cells[result.cm.budgetCol].Value) || 0) : null
       };
-    });
-    bySection[r.section].push({ name: r.name, monthly });
+    }
   }
-  const header = rows.find((rr) => rr.RowType === 'Header');
-  const debug = {
-    reportName: (data.Reports && data.Reports[0] && data.Reports[0].ReportName) || null,
-    topRowTypes: rows.map((rr) => rr.RowType + (rr.Title ? (':' + rr.Title) : '')),
-    headerLabels: ((header && header.Cells) || []).map((c) => c.Value),
-    flatRowCount: flat.length
-  };
+
   return {
     months,
-    sections: Object.keys(bySection).map((k) => ({ key: k, label: sectionLabels[k], accounts: bySection[k] })),
-    debug
+    sections: Object.keys(bySection).map((k) => ({ key: k, label: sectionLabels[k], accounts: Object.values(bySection[k]) })),
+    debug: lastDebug
   };
 }
 
