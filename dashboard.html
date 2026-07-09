@@ -256,6 +256,10 @@ body {
 .budget-matrix td.num { color: var(--text); }
 .budget-matrix td.num.dim { color: var(--muted); }
 .budget-section-row td { font-family: 'Khand', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; color: var(--muted); background: var(--cream2); padding-top: 10px; padding-bottom: 4px; }
+.chart-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; }
+.chart-legend { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.chart-legend-row { display: flex; align-items: center; gap: 8px; }
+.chart-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 </style>
 </head>
 <body>
@@ -908,6 +912,143 @@ function renderDashboard(root) {
 
   renderTaxSetAside(root, cur, r);
   renderBudgetSection(root);
+  renderRevenuePie(root);
+  renderAnnualBarChart(root);
+}
+
+/* ---------- Charts (additional - hand-rolled SVG, no external library so
+   the single-file dashboard stays self-contained). Both read from the same
+   budget data already fetched for the Budget projection section. ---------- */
+var PIE_COLORS = ['#2D6A4F', '#CC5500', '#F2A900', '#1A5FB4', '#5C3DB0', '#0E8A6E', '#C04B28', '#1A7A3C', '#8C8075', '#40342c'];
+
+function svgEl(tag, attrs) {
+  var n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  if (attrs) Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+  return n;
+}
+function svgTitle(node, text) {
+  var t = svgEl('title'); t.textContent = text; node.appendChild(t); return node;
+}
+
+function pieChart(data, size) {
+  size = size || 180;
+  var total = data.reduce(function (s, d) { return s + Math.max(0, d.value); }, 0);
+  var svg = svgEl('svg', { viewBox: '0 0 ' + size + ' ' + size, width: size, height: size });
+  var cx = size / 2, cy = size / 2, r = size / 2 - 4, ir = r * 0.55;
+  if (total <= 0) {
+    svg.appendChild(svgEl('circle', { cx: cx, cy: cy, r: r, fill: 'none', stroke: 'var(--border)', 'stroke-width': (r - ir) }));
+    return svg;
+  }
+  var angle = -Math.PI / 2;
+  function pt(a, rad) { return [cx + rad * Math.cos(a), cy + rad * Math.sin(a)]; }
+  data.forEach(function (d) {
+    if (d.value <= 0) return;
+    var frac = d.value / total;
+    var a0 = angle, a1 = angle + frac * Math.PI * 2;
+    angle = a1;
+    var large = (a1 - a0) > Math.PI ? 1 : 0;
+    var p0 = pt(a0, r), p1 = pt(a1, r), p2 = pt(a1, ir), p3 = pt(a0, ir);
+    var dstr = 'M' + p0[0] + ',' + p0[1] + ' A' + r + ',' + r + ' 0 ' + large + ' 1 ' + p1[0] + ',' + p1[1]
+      + ' L' + p2[0] + ',' + p2[1] + ' A' + ir + ',' + ir + ' 0 ' + large + ' 0 ' + p3[0] + ',' + p3[1] + ' Z';
+    var path = svgEl('path', { d: dstr, fill: d.color });
+    svgTitle(path, d.label + ': ' + fmtMoney(d.value) + ' (' + (frac * 100).toFixed(1) + '%)');
+    svg.appendChild(path);
+  });
+  return svg;
+}
+
+function renderRevenuePie(root) {
+  if (!state.budget || !state.budget.sections || !state.budget.months) return;
+  var income = state.budget.sections.filter(function (s) { return s.key === 'income'; })[0];
+  if (!income || !income.accounts.length) return;
+  var mk = monthKey(tradingToday());
+  var idx = state.budget.months.indexOf(mk);
+  if (idx === -1) return;
+  var items = income.accounts.map(function (a, i) {
+    var cell = a.monthly[idx];
+    return { label: a.name, value: (cell && cell.actual) || 0, color: PIE_COLORS[i % PIE_COLORS.length] };
+  }).filter(function (d) { return d.value > 0; }).sort(function (a, b) { return b.value - a.value; });
+  if (!items.length) return;
+
+  var sec = el('div', 'budget-section');
+  sec.appendChild(el('div', 'section-title', 'Revenue by category (' + esc(monthShortLabel(mk)) + ')'));
+  var wrap = el('div', 'chart-row');
+  wrap.appendChild(pieChart(items, 180));
+  var legend = el('div', 'chart-legend');
+  items.forEach(function (d) {
+    var row = el('div', 'chart-legend-row');
+    var sw = el('span', 'chart-swatch'); sw.style.background = d.color;
+    row.appendChild(sw);
+    row.appendChild(el('span', null, esc(d.name || d.label) + ' \u2014 ' + fmtMoney(d.value)));
+    legend.appendChild(row);
+  });
+  wrap.appendChild(legend);
+  sec.appendChild(wrap);
+  root.appendChild(sec);
+}
+
+function barChart(pairs, width, height) {
+  width = width || 520; height = height || 220;
+  var svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, width: '100%' });
+  svg.style.maxWidth = width + 'px'; svg.style.height = height + 'px'; svg.style.display = 'block';
+  var maxV = Math.max.apply(null, pairs.reduce(function (a, p) { a.push(p.actual, p.budget); return a; }, [1]));
+  var n = pairs.length, groupW = width / n, barW = groupW * 0.26, padBottom = 26;
+  pairs.forEach(function (p, i) {
+    var gx = i * groupW + groupW / 2;
+    var hA = (p.actual / maxV) * (height - padBottom - 10);
+    var hB = (p.budget / maxV) * (height - padBottom - 10);
+    var rA = svgEl('rect', { x: gx - barW - 2, y: height - padBottom - hA, width: barW, height: hA, fill: 'var(--accent)' });
+    svgTitle(rA, p.label + ' actual: ' + fmtMoney(p.actual));
+    svg.appendChild(rA);
+    var rB = svgEl('rect', { x: gx + 2, y: height - padBottom - hB, width: barW, height: hB, fill: 'var(--border-med)' });
+    svgTitle(rB, p.label + ' budget: ' + fmtMoney(p.budget));
+    svg.appendChild(rB);
+    var lab = svgEl('text', { x: gx, y: height - 8, 'text-anchor': 'middle', 'font-size': '11', fill: 'var(--muted)' });
+    lab.textContent = p.label;
+    svg.appendChild(lab);
+  });
+  return svg;
+}
+
+var WAGE_NAME_RE = /wages|salaries|superannuation|super|payroll|annual leave|long service|workcover/i;
+function computeAnnualBuckets() {
+  if (!state.budget || !state.budget.sections) return null;
+  var buckets = {
+    revenue: { actual: 0, budget: 0 }, cogs: { actual: 0, budget: 0 },
+    wages: { actual: 0, budget: 0 }, overheads: { actual: 0, budget: 0 }
+  };
+  state.budget.sections.forEach(function (s) {
+    s.accounts.forEach(function (a) {
+      var isWage = WAGE_NAME_RE.test(a.name || '');
+      (a.monthly || []).forEach(function (m) {
+        if (s.key === 'income') { buckets.revenue.actual += m.actual || 0; buckets.revenue.budget += m.budget || 0; }
+        else if (s.key === 'cos') { buckets.cogs.actual += m.actual || 0; buckets.cogs.budget += m.budget || 0; }
+        else if (s.key === 'opex') {
+          if (isWage) { buckets.wages.actual += m.actual || 0; buckets.wages.budget += m.budget || 0; }
+          else { buckets.overheads.actual += m.actual || 0; buckets.overheads.budget += m.budget || 0; }
+        }
+      });
+    });
+  });
+  return buckets;
+}
+
+function renderAnnualBarChart(root) {
+  var b = computeAnnualBuckets();
+  if (!b) return;
+  var sec = el('div', 'budget-section');
+  sec.appendChild(el('div', 'section-title', 'This financial year so far: actual vs budget'));
+  var legend = el('div', 'm-sub');
+  legend.innerHTML = '<span class="chart-swatch" style="background:var(--accent)"></span>Actual &nbsp; <span class="chart-swatch" style="background:var(--border-med)"></span>Budget';
+  legend.style.marginBottom = '0.5rem';
+  sec.appendChild(legend);
+  sec.appendChild(barChart([
+    { label: 'Revenue', actual: b.revenue.actual, budget: b.revenue.budget },
+    { label: 'COGS', actual: b.cogs.actual, budget: b.cogs.budget },
+    { label: 'Wages', actual: b.wages.actual, budget: b.wages.budget },
+    { label: 'Overheads', actual: b.overheads.actual, budget: b.overheads.budget }
+  ]));
+  root.appendChild(sec);
 }
 
 /* Rough estimate, not a locked kpi-spec metric: what to set aside for BAS
