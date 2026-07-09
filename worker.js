@@ -593,63 +593,64 @@ function xeroBudgetColumnMap(reportJson, months) {
   return mapping;
 }
 
-/* One call gets a whole year of monthly Actual+Budget pairs (periods capped
-   at 12, same limit as the P&L). */
-async function xeroBudgetForYear(env, h, year) {
+/* One call gets the whole financial year (12 months forward from fyStart,
+   'YYYY-MM'), every account line, Actual+Budget per month - not just a
+   month/YTD summary. periods is capped at 11 prior + current = 12, which is
+   exactly one FY, so this never needs to chunk across calls. */
+async function xeroBudgetForFY(env, h, fyStartMonth) {
   const months = [];
-  for (let m = 1; m <= 12; m++) months.push(year + '-' + String(m).padStart(2, '0'));
-  const data = await xeroBudgetSummary(env, h, year + '-01-01', 11);
+  let [y, m] = fyStartMonth.split('-').map(Number);
+  for (let i = 0; i < 12; i++) {
+    months.push(y + '-' + String(m).padStart(2, '0'));
+    m++; if (m > 12) { m = 1; y++; }
+  }
+  const data = await xeroBudgetSummary(env, h, fyStartMonth + '-01', 11);
   const rows = (data.Reports && data.Reports[0] && data.Reports[0].Rows) || [];
   const flat = [];
   xeroFlattenBudgetRows(rows, '', flat);
   const colMap = xeroBudgetColumnMap(data, months);
-  const byMonth = {};
-  for (const m of colMap) {
-    byMonth[m.month] = flat.map((r) => ({
-      name: r.name,
-      section: r.section,
-      actual: m.actualCol != null ? (parseFloat(r.cells[m.actualCol] && r.cells[m.actualCol].Value) || 0) : null,
-      budget: m.budgetCol != null ? (parseFloat(r.cells[m.budgetCol] && r.cells[m.budgetCol].Value) || 0) : null
-    }));
+  const colByMonth = {};
+  colMap.forEach((c) => { colByMonth[c.month] = c; });
+
+  const sectionLabels = { income: 'Income', cos: 'Cost of Sales', opex: 'Operating Expenses' };
+  const bySection = { income: [], cos: [], opex: [] };
+  for (const r of flat) {
+    const monthly = months.map((mo) => {
+      const cm = colByMonth[mo];
+      return {
+        actual: cm && cm.actualCol != null ? (parseFloat(r.cells[cm.actualCol] && r.cells[cm.actualCol].Value) || 0) : null,
+        budget: cm && cm.budgetCol != null ? (parseFloat(r.cells[cm.budgetCol] && r.cells[cm.budgetCol].Value) || 0) : null
+      };
+    });
+    bySection[r.section].push({ name: r.name, monthly });
   }
-  const header = rows.find((r) => r.RowType === 'Header');
+  const header = rows.find((rr) => rr.RowType === 'Header');
   const debug = {
     reportName: (data.Reports && data.Reports[0] && data.Reports[0].ReportName) || null,
-    topRowTypes: rows.map((r) => r.RowType + (r.Title ? (':' + r.Title) : '')),
+    topRowTypes: rows.map((rr) => rr.RowType + (rr.Title ? (':' + rr.Title) : '')),
     headerLabels: ((header && header.Cells) || []).map((c) => c.Value),
     flatRowCount: flat.length
   };
-  return { months, byMonth, debug };
+  return {
+    months,
+    sections: Object.keys(bySection).map((k) => ({ key: k, label: sectionLabels[k], accounts: bySection[k] })),
+    debug
+  };
 }
 
-/* GET /api/budget?month=YYYY-MM -> { month:{label,accounts}, year:{label,accounts} }
-   year.accounts is the Jan-through-selected-month running total per category
-   (year to date), not a full-year forecast. */
+/* GET /api/budget?fyStart=YYYY-MM -> { months:[...12], sections:[{key,label,
+   accounts:[{name,monthly:[{actual,budget}x12]}]}] } - every category, every
+   month of the financial year, so the dashboard can mark over/under spend
+   month by month rather than just a single-month snapshot. */
 async function apiBudget(env, url) {
-  const monthParam = url.searchParams.get('month') || '';
-  if (!/^\d{4}-\d{2}$/.test(monthParam)) return json({ error: 'bad month' }, 400);
-  const year = monthParam.slice(0, 4);
+  const fyStart = url.searchParams.get('fyStart') || '';
+  if (!/^\d{4}-\d{2}$/.test(fyStart)) return json({ error: 'bad fyStart' }, 400);
   const adapter = ADAPTERS.accounting;
   if (!adapter || !adapter.configured) return json({ error: 'not configured' }, 400);
   try {
     const h = makeHelpers(env, 'accounting');
-    const yearData = await xeroBudgetForYear(env, h, year);
-    const monthAccounts = yearData.byMonth[monthParam] || [];
-    const monthsToDate = yearData.months.filter((m) => m <= monthParam);
-    const ytd = {};
-    for (const mo of monthsToDate) {
-      for (const r of yearData.byMonth[mo] || []) {
-        const key = r.section + '|' + r.name;
-        if (!ytd[key]) ytd[key] = { name: r.name, section: r.section, actual: 0, budget: 0 };
-        if (r.actual != null) ytd[key].actual += r.actual;
-        if (r.budget != null) ytd[key].budget += r.budget;
-      }
-    }
-    return json({
-      month: { label: monthParam, accounts: monthAccounts },
-      year: { label: year, accounts: Object.values(ytd) },
-      debug: yearData.debug
-    });
+    const data = await xeroBudgetForFY(env, h, fyStart);
+    return json(data);
   } catch (err) {
     return json({ error: 'budget fetch failed', plain: plainError(err.status || 500) }, err.status || 500);
   }

@@ -252,6 +252,10 @@ body {
 .budget-table th { text-align: left; font-weight: 500; color: var(--muted); padding: 6px 10px; border-bottom: 1px solid rgba(13,13,13,0.1); }
 .budget-table td { padding: 6px 10px; border-bottom: 1px solid rgba(13,13,13,0.06); }
 .budget-table td.num, .budget-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.budget-matrix { font-size: 12px; }
+.budget-matrix td.num { color: var(--text); }
+.budget-matrix td.num.dim { color: var(--muted); }
+.budget-section-row td { font-family: 'Khand', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; color: var(--muted); background: var(--cream2); padding-top: 10px; padding-bottom: 4px; }
 </style>
 </head>
 <body>
@@ -950,16 +954,22 @@ function renderTaxSetAside(root, cur, r) {
   root.appendChild(sec);
 }
 
+var MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function monthShortLabel(mk) {
+  var y = mk.slice(0, 4), m = +mk.slice(5, 7);
+  return MONTH_ABBR[m - 1] + ' ' + y.slice(2);
+}
+
 /* ---------- Budget projection (additional section - kpi-spec.md's locked
    metrics are untouched; this tracks the owner's own Xero budgets across
-   every P&L category, month and year to date, clearly labelled as its own
-   thing). Fetches lazily on first render each month. ---------- */
+   every P&L category, every month of the financial year, with over/under
+   markers). Fetches lazily once per financial year. ---------- */
 function renderBudgetSection(root) {
   if (isManual() || !isConfigured('accounting')) return;
-  var mk = monthKey(tradingToday());
-  if (state.budgetMonth !== mk && !state.budgetLoading) {
-    state.budgetLoading = true; state.budgetMonth = mk; state.budgetError = null;
-    fetch('/api/budget?month=' + encodeURIComponent(mk)).then(function (res) {
+  var fyk = monthKey(fyStart(tradingToday()));
+  if (state.budgetFY !== fyk && !state.budgetLoading) {
+    state.budgetLoading = true; state.budgetFY = fyk; state.budgetError = null;
+    fetch('/api/budget?fyStart=' + encodeURIComponent(fyk)).then(function (res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
     }).then(function (j) {
@@ -986,40 +996,60 @@ function renderBudgetSection(root) {
     root.appendChild(sec);
     return;
   }
-  if (!state.budget) { root.appendChild(sec); return; }
+  if (!state.budget || !state.budget.months) { root.appendChild(sec); return; }
 
-  function budgetTable(label, block) {
-    var wrap = el('div', 'budget-table-wrap');
-    wrap.appendChild(el('div', 'cmp-lab', esc(label)));
-    var tbl = el('table', 'budget-table');
-    var thead = el('tr');
-    ['Category', 'Actual', 'Budget', 'Variance'].forEach(function (h) { thead.appendChild(el('th', null, esc(h))); });
-    tbl.appendChild(thead);
-    var accounts = (block && block.accounts) || [];
-    if (!accounts.length) {
-      var er = el('tr'); var ed = el('td', 'm-sub', 'No budget set in Xero for this period yet.'); ed.colSpan = 4; er.appendChild(ed); tbl.appendChild(er);
-      if (state.budget && state.budget.debug) {
-        var dr = el('tr'); var dd = el('td', 'm-sub', 'For your AI: ' + esc(JSON.stringify(state.budget.debug))); dd.colSpan = 4; dd.style.fontSize = '10px'; dd.style.opacity = '0.6'; dr.appendChild(dd); tbl.appendChild(dr);
-      }
+  var months = state.budget.months;
+  var sections = state.budget.sections || [];
+  var anyAccounts = sections.some(function (s) { return s.accounts && s.accounts.length; });
+
+  if (!anyAccounts) {
+    sec.appendChild(el('div', 'm-sub', 'No budget set in Xero for this financial year yet.'));
+    if (state.budget.debug) {
+      var dd = el('div', 'm-sub', 'For your AI: ' + esc(JSON.stringify(state.budget.debug)));
+      dd.style.fontSize = '10px'; dd.style.opacity = '0.6'; dd.style.marginTop = '6px';
+      sec.appendChild(dd);
     }
-    accounts.forEach(function (a) {
-      var tr = el('tr');
-      tr.appendChild(el('td', null, esc(a.name || '')));
-      tr.appendChild(el('td', 'num', a.actual != null ? fmtMoney(a.actual) : '\u2014'));
-      tr.appendChild(el('td', 'num', a.budget != null ? fmtMoney(a.budget) : '\u2014'));
-      var v = (a.actual != null && a.budget != null) ? (a.actual - a.budget) : null;
-      var overSpend = v != null && v > 0 && a.section !== 'income'; /* spending over its budget */
-      var underEarn = v != null && v < 0 && a.section === 'income'; /* revenue under its budget */
-      var cls = 'num' + ((overSpend || underEarn) ? ' bad' : (v != null ? ' good' : ''));
-      tr.appendChild(el('td', cls, v != null ? fmtMoney(v) : '\u2014'));
-      tbl.appendChild(tr);
-    });
-    wrap.appendChild(tbl);
-    return wrap;
+    root.appendChild(sec);
+    return;
   }
 
-  sec.appendChild(budgetTable('This month vs budget', state.budget.month));
-  sec.appendChild(budgetTable('Year to date vs budget', state.budget.year));
+  var sub = el('div', 'm-sub', 'Green means on or under budget, red flags overspend (or under-target revenue). Hover a figure for actual vs budget.');
+  sub.style.marginBottom = '0.6rem';
+  sec.appendChild(sub);
+
+  var wrap = el('div', 'budget-table-wrap');
+  var tbl = el('table', 'budget-table budget-matrix');
+  var thead = el('tr');
+  thead.appendChild(el('th', null, 'Category'));
+  months.forEach(function (mo) { thead.appendChild(el('th', 'num', esc(monthShortLabel(mo)))); });
+  tbl.appendChild(thead);
+
+  sections.forEach(function (s) {
+    if (!s.accounts || !s.accounts.length) return;
+    var sr = el('tr', 'budget-section-row');
+    var sc = el('td', null, esc(s.label)); sc.colSpan = months.length + 1;
+    sr.appendChild(sc);
+    tbl.appendChild(sr);
+    s.accounts.forEach(function (a) {
+      var tr = el('tr');
+      tr.appendChild(el('td', null, esc(a.name || '')));
+      (a.monthly || []).forEach(function (cell) {
+        var v = (cell.actual != null && cell.budget != null) ? (cell.actual - cell.budget) : null;
+        var overSpend = v != null && v > 0 && s.key !== 'income';
+        var underEarn = v != null && v < 0 && s.key === 'income';
+        var cls = 'num' + ((overSpend || underEarn) ? ' bad' : (v != null ? ' good' : ' dim'));
+        var td = el('td', cls, v != null ? fmtMoney(v) : '\u2014');
+        if (cell.actual != null || cell.budget != null) {
+          td.title = 'Actual ' + (cell.actual != null ? fmtMoney(cell.actual) : '\u2014') + ' vs Budget ' + (cell.budget != null ? fmtMoney(cell.budget) : '\u2014');
+        }
+        tr.appendChild(td);
+      });
+      tbl.appendChild(tr);
+    });
+  });
+
+  wrap.appendChild(tbl);
+  sec.appendChild(wrap);
   root.appendChild(sec);
 }
 
