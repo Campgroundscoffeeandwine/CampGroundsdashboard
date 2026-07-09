@@ -678,6 +678,81 @@ async function apiBudget(env, url) {
   }
 }
 
+/* ----------------------------------------------------------------------------
+   Daily tracker (ADDITIONAL - this week, day by day: revenue from Xero,
+   transaction count from Square, approved labour cost from Deputy). Reuses
+   the exact same per-source functions already wired above - a day is just a
+   fromDate==toDate P&L call, a one-day Square window, and Deputy's
+   TimesheetPayReturn (APPROVED timesheets only, not the roster/projected
+   one used for the projected Wage %).
+---------------------------------------------------------------------------- */
+
+/* Sum Cost from Deputy's TimesheetPayReturn resource (only timesheets
+   approved and ready for payroll - distinct from Roster, which is the
+   planned/rostered shift used for the projected Wage %), grouped by day. */
+async function deputyApprovedCostByDay(env, from, to) {
+  const perDay = {};
+  let start = 0;
+  const max = 500;
+  for (;;) {
+    const body = {
+      search: {
+        s1: { field: 'Date', type: 'ge', data: from },
+        s2: { field: 'Date', type: 'le', data: to }
+      },
+      sort: { Date: 'asc' },
+      start, max
+    };
+    const rows = await deputyFetch(env, '/api/v1/resource/TimesheetPayReturn/QUERY', { method: 'POST', body: JSON.stringify(body) });
+    if (!Array.isArray(rows) || !rows.length) break;
+    for (const r of rows) {
+      const d = (r.Date || '').slice(0, 10);
+      const cost = typeof r.Cost === 'number' ? r.Cost : (parseFloat(r.Cost) || 0);
+      if (d) perDay[d] = (perDay[d] || 0) + cost;
+    }
+    if (rows.length < max) break;
+    start += max;
+  }
+  return perDay;
+}
+
+/* GET /api/weekly?from=YYYY-MM-DD&to=YYYY-MM-DD&tz=...&rollover=N
+   -> { days:[...], revenue:[...], transactions:[...], labourCost:[...] }
+   One entry per calendar day in the range. Each source fails independently
+   (same pattern as fetchSlot) - one broken source never blanks the others. */
+async function apiWeeklyTracker(env, url) {
+  const from = url.searchParams.get('from') || '';
+  const to = url.searchParams.get('to') || '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return json({ error: 'bad range' }, 400);
+  const tz = url.searchParams.get('tz') || 'Australia/Sydney';
+  const rollover = Math.max(0, Math.min(6, parseInt(url.searchParams.get('rollover') || '0', 10) || 0));
+  const days = eachDate(from, to, 31);
+
+  const revenue = await Promise.all(days.map(async (d) => {
+    if (!ADAPTERS.accounting.configured) return null;
+    try {
+      const h = makeHelpers(env, 'accounting');
+      const data = await xeroPnl(env, h, d, d, null);
+      return parsePnlSinglePeriod(data).revenue;
+    } catch (e) { return null; }
+  }));
+
+  const transactions = await Promise.all(days.map(async (d) => {
+    if (!ADAPTERS.pos.configured) return null;
+    try { return await squareCountCompleted(env, d, d, tz, rollover); } catch (e) { return null; }
+  }));
+
+  let labourCost = days.map(() => null);
+  if (ADAPTERS.rostering.configured) {
+    try {
+      const perDay = await deputyApprovedCostByDay(env, from, to);
+      labourCost = days.map((d) => (d in perDay ? perDay[d] : 0));
+    } catch (e) { /* leave as nulls - never blocks the other two lines */ }
+  }
+
+  return json({ days, revenue, transactions, labourCost });
+}
+
 /* ============================================================================
    Everything below is the shell. You should rarely need to edit it.
 ============================================================================ */
@@ -1299,6 +1374,10 @@ export default {
     if (path === '/api/budget' && request.method === 'GET') {
       if (!loggedIn) return json({ error: 'auth' }, 401);
       return apiBudget(env, url);
+    }
+    if (path === '/api/weekly' && request.method === 'GET') {
+      if (!loggedIn) return json({ error: 'auth' }, 401);
+      return apiWeeklyTracker(env, url);
     }
     const authRoute = /^\/auth\/(accounting|pos|rostering)\/(start|callback)$/.exec(path);
     if (authRoute && request.method === 'GET') {

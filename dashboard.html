@@ -505,9 +505,13 @@ var state = {
   fetchedAt: null,
   fetchError: null,
   budget: null,                /* last /api/budget payload */
-  budgetMonth: null,           /* which month it was fetched for */
+  budgetFY: null,              /* which financial year start it was fetched for */
   budgetLoading: false,
-  budgetError: null
+  budgetError: null,
+  weekTracker: null,           /* last /api/weekly payload */
+  weekTrackerKey: null,        /* which from:to range it was fetched for */
+  weekTrackerLoading: false,
+  weekTrackerError: null
 };
 
 function apiUrl(force) {
@@ -914,6 +918,113 @@ function renderDashboard(root) {
   renderBudgetSection(root);
   renderRevenuePie(root);
   renderAnnualBarChart(root);
+  renderWeeklyTracker(root);
+}
+
+/* ---------- Daily tracker (ADDITIONAL - this week, day by day: revenue
+   from Xero, transaction count from Square, approved labour cost from
+   Deputy's approved timesheets - distinct from the projected roster cost
+   used elsewhere). Always shows the current calendar week regardless of
+   which period the rest of the dashboard is showing. ---------- */
+function singleBarChart(labels, values, color, fmtFn, height) {
+  height = height || 110;
+  var width = 560;
+  var svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, width: '100%' });
+  svg.style.maxWidth = width + 'px'; svg.style.height = height + 'px'; svg.style.display = 'block';
+  var n = labels.length, groupW = width / n, barW = groupW * 0.5, padBottom = 20;
+  var maxV = Math.max.apply(null, values.filter(function (v) { return v != null; }).concat([1]));
+  labels.forEach(function (lab, i) {
+    var gx = i * groupW + groupW / 2;
+    var v = values[i];
+    var h = v != null ? (v / maxV) * (height - padBottom - 8) : 0;
+    var rect = svgEl('rect', { x: gx - barW / 2, y: height - padBottom - h, width: barW, height: Math.max(h, v != null ? 1 : 0), fill: v != null ? color : 'var(--border)' });
+    svgTitle(rect, lab + ': ' + (v != null ? (fmtFn ? fmtFn(v) : v) : 'No data yet'));
+    svg.appendChild(rect);
+    var t = svgEl('text', { x: gx, y: height - 6, 'text-anchor': 'middle', 'font-size': '10', fill: 'var(--muted)' });
+    t.textContent = lab;
+    svg.appendChild(t);
+  });
+  return svg;
+}
+
+function renderWeeklyTracker(root) {
+  if (isManual() || (!isConfigured('accounting') && !isConfigured('pos') && !isConfigured('rostering'))) return;
+  var wk = resolvePeriod('thisWeek', null, null);
+  var fromIso = iso(wk.from), toIso = iso(wk.to);
+  var key = fromIso + ':' + toIso;
+  if (state.weekTrackerKey !== key && !state.weekTrackerLoading) {
+    state.weekTrackerLoading = true; state.weekTrackerKey = key; state.weekTrackerError = null;
+    var q = 'from=' + fromIso + '&to=' + toIso + '&tz=' + encodeURIComponent(SETTINGS.timezone) + '&rollover=' + (+SETTINGS.rolloverHour || 0);
+    fetch('/api/weekly?' + q).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }).then(function (j) {
+      state.weekTracker = j; state.weekTrackerLoading = false; render();
+    }).catch(function () {
+      state.weekTrackerLoading = false;
+      state.weekTrackerError = 'Couldn\u2019t fetch the daily tracker just now. Try refresh.';
+      render();
+    });
+  }
+
+  var sec = el('div', 'budget-section');
+  sec.appendChild(el('div', 'section-title', 'This week, day by day'));
+
+  if (state.weekTrackerLoading && !state.weekTracker) {
+    sec.appendChild(el('div', 'm-sub', 'Fetching daily figures\u2026'));
+    root.appendChild(sec);
+    return;
+  }
+  if (state.weekTrackerError && !state.weekTracker) {
+    sec.appendChild(el('div', 'notconf-msg', esc(state.weekTrackerError)));
+    root.appendChild(sec);
+    return;
+  }
+  if (!state.weekTracker || state.weekTrackerKey !== key) { root.appendChild(sec); return; }
+
+  var sub = el('div', 'm-sub', 'Revenue is from Xero (day-level accuracy depends on how your books post daily takings), transactions from Square, approved labour cost from Deputy\u2019s approved timesheets (not the roster). Future days show no data yet.');
+  sub.style.marginBottom = '0.6rem';
+  sec.appendChild(sub);
+
+  var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var dayLabels = state.weekTracker.days.map(function (d) {
+    var dt = new Date(d + 'T12:00:00Z');
+    return dayNames[dt.getUTCDay()];
+  });
+
+  var tblWrap = el('div', 'budget-table-wrap');
+  var tbl = el('table', 'budget-table');
+  var thead = el('tr');
+  ['Day', 'Revenue (Xero)', 'Transactions (Square)', 'Approved labour (Deputy)'].forEach(function (h) { thead.appendChild(el('th', null, esc(h))); });
+  tbl.appendChild(thead);
+  state.weekTracker.days.forEach(function (d, i) {
+    var tr = el('tr');
+    tr.appendChild(el('td', null, esc(dayLabels[i]) + ' ' + esc(d.slice(5))));
+    var rev = state.weekTracker.revenue[i];
+    var txn = state.weekTracker.transactions[i];
+    var lab = state.weekTracker.labourCost[i];
+    tr.appendChild(el('td', 'num', rev != null ? fmtMoney(rev) : '\u2014'));
+    tr.appendChild(el('td', 'num', txn != null ? txn.toLocaleString() : '\u2014'));
+    tr.appendChild(el('td', 'num', lab != null ? fmtMoney(lab) : '\u2014'));
+    tbl.appendChild(tr);
+  });
+  tblWrap.appendChild(tbl);
+  sec.appendChild(tblWrap);
+
+  if (isConfigured('accounting')) {
+    sec.appendChild(el('div', 'cmp-lab', 'Revenue by day'));
+    sec.appendChild(singleBarChart(dayLabels, state.weekTracker.revenue, 'var(--accent)', fmtMoney));
+  }
+  if (isConfigured('pos')) {
+    sec.appendChild(el('div', 'cmp-lab', 'Transactions by day'));
+    sec.appendChild(singleBarChart(dayLabels, state.weekTracker.transactions, '#1A5FB4', function (v) { return Math.round(v) + ''; }));
+  }
+  if (isConfigured('rostering')) {
+    sec.appendChild(el('div', 'cmp-lab', 'Approved labour cost by day'));
+    sec.appendChild(singleBarChart(dayLabels, state.weekTracker.labourCost, '#C04B28', fmtMoney));
+  }
+
+  root.appendChild(sec);
 }
 
 /* ---------- Charts (additional - hand-rolled SVG, no external library so
