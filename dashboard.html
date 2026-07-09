@@ -1013,7 +1013,7 @@ function renderBudgetSection(root) {
     return;
   }
 
-  var sub = el('div', 'm-sub', 'Green means on or under budget, red flags overspend (or under-target revenue). Hover a figure for actual vs budget.');
+  var sub = el('div', 'm-sub', 'Each figure is your actual for that month (compare it straight against Xero). Green means on or under budget, red flags overspend (or under-target revenue) \u2014 hover a figure to see the budget it\u2019s measured against.');
   sub.style.marginBottom = '0.6rem';
   sec.appendChild(sub);
 
@@ -1038,9 +1038,13 @@ function renderBudgetSection(root) {
         var overSpend = v != null && v > 0 && s.key !== 'income';
         var underEarn = v != null && v < 0 && s.key === 'income';
         var cls = 'num' + ((overSpend || underEarn) ? ' bad' : (v != null ? ' good' : ' dim'));
-        var td = el('td', cls, v != null ? fmtMoney(v) : '\u2014');
+        /* Show the ACTUAL dollar figure - directly comparable to what the
+           owner sees in Xero - not the variance. Colour alone carries the
+           over/under-budget marker the owner asked for. */
+        var shown = cell.actual != null ? fmtMoney(cell.actual) : (cell.budget != null ? '\u2014' : '\u2014');
+        var td = el('td', cls, shown);
         if (cell.actual != null || cell.budget != null) {
-          td.title = 'Actual ' + (cell.actual != null ? fmtMoney(cell.actual) : '\u2014') + ' vs Budget ' + (cell.budget != null ? fmtMoney(cell.budget) : '\u2014');
+          td.title = 'Actual ' + (cell.actual != null ? fmtMoney(cell.actual) : '\u2014') + ' \u00b7 Budget ' + (cell.budget != null ? fmtMoney(cell.budget) : '\u2014') + (v != null ? (' \u00b7 Variance ' + fmtMoney(v)) : '');
         }
         tr.appendChild(td);
       });
