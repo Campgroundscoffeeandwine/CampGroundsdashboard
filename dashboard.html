@@ -595,6 +595,8 @@ function periodValues(slot) {  /* slot: 'cur' | 'prev' | 'yoy' */
   }
   if (pos) out.count = num(pos.count);
   if (ros) out.rosteredCost = num(ros.cost);
+  if (ros) out.rosteredAdminCost = num(ros.adminCost);
+  if (ros) out.rosteredServiceCost = num(ros.serviceCost);
   return out;
 }
 function num(v) { return (typeof v === 'number' && isFinite(v)) ? v : null; }
@@ -931,6 +933,11 @@ function metricCard(key, cur, prev, yoy, r) {
       var ps = el('div', 'm-sub');
       ps.innerHTML = '<span class="m-tag tag-proj" style="margin:0 6px 0 0">Projected</span>' + pj + '% from ' + esc(P.rostering) + ' roster';
       card.appendChild(ps);
+    }
+    if (key === 'wage' && P.rostering && cur.rosteredAdminCost != null && cur.rosteredServiceCost != null) {
+      var pa = el('div', 'm-sub');
+      pa.innerHTML = '<span class="m-tag tag-proj" style="margin:0 6px 0 0">Projected split</span>Admin $' + Math.round(cur.rosteredAdminCost).toLocaleString() + ' \u00b7 Service $' + Math.round(cur.rosteredServiceCost).toLocaleString();
+      card.appendChild(pa);
     }
 
     /* Meter: target for most metrics, recent-average benchmark for revenue */

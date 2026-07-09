@@ -170,17 +170,19 @@ const ADAPTERS = {
       return { connected: true, org: name, sandbox: false };
     },
     async fetchRange(env, h, q) {
-      return { cost: await deputyRosterCost(env, q.from, q.to) };
+      const b = await deputyRosterCostBreakdown(env, q.from, q.to);
+      return { cost: b.total, adminCost: b.admin, serviceCost: b.service };
     },
     async fetchMonthly(env, h, q) {
       const months = monthList(q.fromMonth, q.toMonth);
-      const costs = [];
+      const costs = [], adminCosts = [], serviceCosts = [];
       for (const mo of months) {
         const [y, m] = mo.split('-').map(Number);
         const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
-        costs.push(await deputyRosterCost(env, mo + '-01', mo + '-' + String(lastDay).padStart(2, '0')));
+        const b = await deputyRosterCostBreakdown(env, mo + '-01', mo + '-' + String(lastDay).padStart(2, '0'));
+        costs.push(b.total); adminCosts.push(b.admin); serviceCosts.push(b.service);
       }
-      return { months, cost: costs };
+      return { months, cost: costs, adminCost: adminCosts, serviceCost: serviceCosts };
     }
   }
 };
@@ -482,10 +484,29 @@ async function deputyFetch(env, path, init) {
   return res.json();
 }
 
+/* Deputy's "Area" (API name: OperationalUnit) is the roster's department
+   dimension - id -> display name, so roster lines can be grouped by it. */
+async function deputyOperationalUnits(env) {
+  const rows = await deputyFetch(env, '/api/v1/resource/OperationalUnit');
+  const map = {};
+  for (const u of (Array.isArray(rows) ? rows : [])) {
+    map[u.Id] = u.CompanyName || u.OperationalUnitName || u.Name || String(u.Id);
+  }
+  return map;
+}
+/* Admin vs service split - an ADDITIONAL breakdown beyond the locked
+   kpi-spec projected-Wage%-only definition (see kpi-spec.md rule 3: extra
+   metrics are fine as long as they're additional and clearly labelled, never
+   a redefinition). Areas are matched by keyword against admin-sounding
+   names; everything else counts as service. Propose-then-confirm with the
+   owner during setup, same pattern as the Xero wage-account match. */
+const DEPUTY_ADMIN_AREA_KEYWORDS = /admin|office|management|manager|back.?of.?house/i;
+
 /* Sum Roster.Cost for the date range (inclusive, 'YYYY-MM-DD'), paginating
-   via start/max per Deputy's Resource QUERY convention. */
-async function deputyRosterCost(env, from, to) {
-  let total = 0, start = 0;
+   via start/max per Deputy's Resource QUERY convention, split by area. */
+async function deputyRosterCostBreakdown(env, from, to) {
+  const units = await deputyOperationalUnits(env);
+  let total = 0, admin = 0, service = 0, start = 0;
   const max = 500;
   for (;;) {
     const body = {
@@ -498,11 +519,16 @@ async function deputyRosterCost(env, from, to) {
     };
     const rows = await deputyFetch(env, '/api/v1/resource/Roster/QUERY', { method: 'POST', body: JSON.stringify(body) });
     if (!Array.isArray(rows) || !rows.length) break;
-    for (const r of rows) total += (typeof r.Cost === 'number' ? r.Cost : (parseFloat(r.Cost) || 0));
+    for (const r of rows) {
+      const cost = (typeof r.Cost === 'number' ? r.Cost : (parseFloat(r.Cost) || 0));
+      total += cost;
+      const areaName = units[r.OperationalUnit] || '';
+      if (DEPUTY_ADMIN_AREA_KEYWORDS.test(areaName)) admin += cost; else service += cost;
+    }
     if (rows.length < max) break;
     start += max;
   }
-  return total;
+  return { total, admin, service };
 }
 
 /* ============================================================================
