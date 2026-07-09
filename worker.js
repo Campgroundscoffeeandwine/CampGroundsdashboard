@@ -84,7 +84,7 @@ const ADAPTERS = {
     oauth: {
       authorizeUrl: 'https://login.xero.com/identity/connect/authorize',
       tokenUrl: 'https://identity.xero.com/connect/token',
-      scopes: 'offline_access accounting.reports.profitandloss.read',
+      scopes: 'offline_access accounting.reports.profitandloss.read accounting.reports.budgetsummary.read',
       clientIdSecret: 'ACCOUNTING_CLIENT_ID',
       clientSecretSecret: 'ACCOUNTING_CLIENT_SECRET',
       tokenAuth: 'basic'   // Xero's token endpoint wants HTTP Basic client auth
@@ -533,6 +533,118 @@ async function deputyRosterCostBreakdown(env, from, to) {
     start += max;
   }
   return { total, admin, service };
+}
+
+/* ----------------------------------------------------------------------------
+   Budget projection (ADDITIONAL feature, owner-requested - kpi-spec.md's
+   locked six/seven metrics are untouched; this is a separate section
+   comparing Xero's own budgets to actuals, per category, month and YTD.
+   Uses the BudgetSummary report (same Rows/Cells report shape as the P&L).
+   Column layout (Actual/Budget pairs per period) is inferred from the
+   Header row's labels where possible, falling back to positional pairing -
+   verify against a real response once the owner reconnects with the new
+   scope, and adjust if Xero's header labels differ from what's assumed here.
+---------------------------------------------------------------------------- */
+
+async function xeroBudgetSummary(env, h, dateStr, periods) {
+  const tenant = await xeroTenant(env, h);
+  const params = new URLSearchParams({ date: dateStr, periods: String(periods), timeframe: '1' });
+  return h.fetchJson('https://api.xero.com/api.xro/2.0/Reports/BudgetSummary?' + params.toString(), {
+    headers: { 'Xero-Tenant-Id': tenant.tenantId, 'Accept': 'application/json' }
+  }, {});
+}
+
+/* Flatten every leaf account line (RowType 'Row'), tagged with its top
+   section title - SummaryRow/Header/Section rows are skipped since the
+   owner asked for every category, not just the four locked totals. */
+function xeroFlattenBudgetRows(rows, sectionTitle, out) {
+  for (const row of rows || []) {
+    if (row.RowType === 'Section') {
+      xeroFlattenBudgetRows(row.Rows, (row.Title || sectionTitle), out);
+    } else if (row.RowType === 'Row') {
+      out.push({
+        section: /income|trading income/i.test(sectionTitle) ? 'income' : (/cost of sales/i.test(sectionTitle) ? 'cos' : 'opex'),
+        name: (row.Cells && row.Cells[0] && row.Cells[0].Value) || '',
+        cells: row.Cells || []
+      });
+    }
+  }
+}
+
+/* Maps each requested month to its Actual/Budget column indexes. Xero pairs
+   two columns per period; use the header label to tell Actual from Budget
+   when it says so explicitly, otherwise assume (Actual, Budget) order. */
+function xeroBudgetColumnMap(reportJson, months) {
+  const rows = (reportJson.Reports && reportJson.Reports[0] && reportJson.Reports[0].Rows) || [];
+  const header = rows.find((r) => r.RowType === 'Header');
+  const cells = (header && header.Cells) || [];
+  const cols = [];
+  for (let i = 1; i < cells.length; i++) {
+    const label = cells[i].Value || '';
+    cols.push({ index: i, isBudget: /budget/i.test(label) });
+  }
+  const mapping = [];
+  for (let i = 0, mi = 0; i < cols.length && mi < months.length; i += 2, mi++) {
+    const a = cols[i], b = cols[i + 1];
+    const actualCol = a && !a.isBudget ? a.index : (b && !b.isBudget ? b.index : (a ? a.index : null));
+    const budgetCol = a && a.isBudget ? a.index : (b && b.isBudget ? b.index : (b ? b.index : null));
+    mapping.push({ month: months[mi], actualCol, budgetCol });
+  }
+  return mapping;
+}
+
+/* One call gets a whole year of monthly Actual+Budget pairs (periods capped
+   at 12, same limit as the P&L). */
+async function xeroBudgetForYear(env, h, year) {
+  const months = [];
+  for (let m = 1; m <= 12; m++) months.push(year + '-' + String(m).padStart(2, '0'));
+  const data = await xeroBudgetSummary(env, h, year + '-01-01', 11);
+  const rows = (data.Reports && data.Reports[0] && data.Reports[0].Rows) || [];
+  const flat = [];
+  xeroFlattenBudgetRows(rows, '', flat);
+  const colMap = xeroBudgetColumnMap(data, months);
+  const byMonth = {};
+  for (const m of colMap) {
+    byMonth[m.month] = flat.map((r) => ({
+      name: r.name,
+      section: r.section,
+      actual: m.actualCol != null ? (parseFloat(r.cells[m.actualCol] && r.cells[m.actualCol].Value) || 0) : null,
+      budget: m.budgetCol != null ? (parseFloat(r.cells[m.budgetCol] && r.cells[m.budgetCol].Value) || 0) : null
+    }));
+  }
+  return { months, byMonth };
+}
+
+/* GET /api/budget?month=YYYY-MM -> { month:{label,accounts}, year:{label,accounts} }
+   year.accounts is the Jan-through-selected-month running total per category
+   (year to date), not a full-year forecast. */
+async function apiBudget(env, url) {
+  const monthParam = url.searchParams.get('month') || '';
+  if (!/^\d{4}-\d{2}$/.test(monthParam)) return json({ error: 'bad month' }, 400);
+  const year = monthParam.slice(0, 4);
+  const adapter = ADAPTERS.accounting;
+  if (!adapter || !adapter.configured) return json({ error: 'not configured' }, 400);
+  try {
+    const h = makeHelpers(env, 'accounting');
+    const yearData = await xeroBudgetForYear(env, h, year);
+    const monthAccounts = yearData.byMonth[monthParam] || [];
+    const monthsToDate = yearData.months.filter((m) => m <= monthParam);
+    const ytd = {};
+    for (const mo of monthsToDate) {
+      for (const r of yearData.byMonth[mo] || []) {
+        const key = r.section + '|' + r.name;
+        if (!ytd[key]) ytd[key] = { name: r.name, section: r.section, actual: 0, budget: 0 };
+        if (r.actual != null) ytd[key].actual += r.actual;
+        if (r.budget != null) ytd[key].budget += r.budget;
+      }
+    }
+    return json({
+      month: { label: monthParam, accounts: monthAccounts },
+      year: { label: year, accounts: Object.values(ytd) }
+    });
+  } catch (err) {
+    return json({ error: 'budget fetch failed', plain: plainError(err.status || 500) }, err.status || 500);
+  }
 }
 
 /* ============================================================================
@@ -1152,6 +1264,10 @@ export default {
     if (path === '/api/metrics' && request.method === 'GET') {
       if (!loggedIn) return json({ error: 'auth' }, 401);
       return apiMetrics(env, url);
+    }
+    if (path === '/api/budget' && request.method === 'GET') {
+      if (!loggedIn) return json({ error: 'auth' }, 401);
+      return apiBudget(env, url);
     }
     const authRoute = /^\/auth\/(accounting|pos|rostering)\/(start|callback)$/.exec(path);
     if (authRoute && request.method === 'GET') {
