@@ -159,12 +159,29 @@ const ADAPTERS = {
      Example (Deputy): pasted permanent token (secret ROSTERING_API_TOKEN).
   */
   rostering: {
-    configured: false,
-    auth: null,
+    configured: true,
+    auth: 'token', /* permanent token from the install's OAuth-clients screen */
     oauth: {},
-    async status(env, h) { return { connected: false }; },
-    async fetchRange(env, h, q) { throw new NotConfigured('rostering'); },
-    async fetchMonthly(env, h, q) { return { months: [], cost: [] }; }
+    async status(env, h) {
+      if (!env.ROSTERING_API_TOKEN) return { connected: false };
+      const rows = await deputyFetch(env, '/api/v1/resource/Company');
+      const co = Array.isArray(rows) ? rows[0] : null;
+      const name = (co && (co.CompanyName || co.Name || co.LegalName)) || null;
+      return { connected: true, org: name, sandbox: false };
+    },
+    async fetchRange(env, h, q) {
+      return { cost: await deputyRosterCost(env, q.from, q.to) };
+    },
+    async fetchMonthly(env, h, q) {
+      const months = monthList(q.fromMonth, q.toMonth);
+      const costs = [];
+      for (const mo of months) {
+        const [y, m] = mo.split('-').map(Number);
+        const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        costs.push(await deputyRosterCost(env, mo + '-01', mo + '-' + String(lastDay).padStart(2, '0')));
+      }
+      return { months, cost: costs };
+    }
   }
 };
 
@@ -441,6 +458,51 @@ async function squareCountCompleted(env, from, to, tz, rollover) {
     cursor = (data && data.cursor) || null;
   } while (cursor);
   return count;
+}
+
+/* ----------------------------------------------------------------------------
+   Deputy-specific helpers (rostering adapter). Optional source: it adds only
+   the PROJECTED wage % (rostered cost / revenue) beside the actual, which
+   already comes verified from Xero - if Deputy is ever disconnected, nothing
+   on the core board is lost.
+   Base URL is this venue's own Deputy install; unlike the OAuth client id
+   and secrets above, it is not a credential (just a subdomain), so it is a
+   plain constant here rather than a Worker secret.
+---------------------------------------------------------------------------- */
+
+const DEPUTY_BASE = 'https://cea04502065645.au.deputy.com';
+
+async function deputyFetch(env, path, init) {
+  const headers = Object.assign(
+    { 'Authorization': 'Bearer ' + (env.ROSTERING_API_TOKEN || ''), 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    (init && init.headers) || {}
+  );
+  const res = await fetch(DEPUTY_BASE + path, Object.assign({}, init || {}, { headers }));
+  if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; }
+  return res.json();
+}
+
+/* Sum Roster.Cost for the date range (inclusive, 'YYYY-MM-DD'), paginating
+   via start/max per Deputy's Resource QUERY convention. */
+async function deputyRosterCost(env, from, to) {
+  let total = 0, start = 0;
+  const max = 500;
+  for (;;) {
+    const body = {
+      search: {
+        s1: { field: 'Date', type: 'ge', data: from },
+        s2: { field: 'Date', type: 'le', data: to }
+      },
+      sort: { Date: 'asc' },
+      start, max
+    };
+    const rows = await deputyFetch(env, '/api/v1/resource/Roster/QUERY', { method: 'POST', body: JSON.stringify(body) });
+    if (!Array.isArray(rows) || !rows.length) break;
+    for (const r of rows) total += (typeof r.Cost === 'number' ? r.Cost : (parseFloat(r.Cost) || 0));
+    if (rows.length < max) break;
+    start += max;
+  }
+  return total;
 }
 
 /* ============================================================================
