@@ -500,7 +500,7 @@ async function deputyOperationalUnits(env) {
    a redefinition). Areas are matched by keyword against admin-sounding
    names; everything else counts as service. Propose-then-confirm with the
    owner during setup, same pattern as the Xero wage-account match. */
-const DEPUTY_ADMIN_AREA_KEYWORDS = /admin|office|management|manager|back.?of.?house/i;
+const DEPUTY_ADMIN_AREA_KEYWORDS = /admin|office|bookkeeping|payroll|^management$|^manager$/i;
 
 /* Sum Roster.Cost for the date range (inclusive, 'YYYY-MM-DD'), paginating
    via start/max per Deputy's Resource QUERY convention, split by area. */
