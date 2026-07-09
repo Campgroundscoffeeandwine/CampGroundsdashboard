@@ -500,7 +500,11 @@ async function deputyOperationalUnits(env) {
    a redefinition). Areas are matched by keyword against admin-sounding
    names; everything else counts as service. Propose-then-confirm with the
    owner during setup, same pattern as the Xero wage-account match. */
-const DEPUTY_ADMIN_AREA_KEYWORDS = /admin|office|bookkeeping|payroll|^management$|^manager$/i;
+/* Confirmed with the owner directly (not guessed): Admin, Events and
+   Training are off-floor/admin areas; Kitchen, Manager, Supervisor, Sales
+   and Night are on-floor/service areas. Exact match against the owner's
+   actual Deputy area names, not a fuzzy keyword guess. */
+const DEPUTY_ADMIN_AREAS = ['admin', 'events', 'training'];
 
 /* Sum Roster.Cost for the date range (inclusive, 'YYYY-MM-DD'), paginating
    via start/max per Deputy's Resource QUERY convention, split by area. */
@@ -523,7 +527,7 @@ async function deputyRosterCostBreakdown(env, from, to) {
       const cost = (typeof r.Cost === 'number' ? r.Cost : (parseFloat(r.Cost) || 0));
       total += cost;
       const areaName = units[r.OperationalUnit] || '';
-      if (DEPUTY_ADMIN_AREA_KEYWORDS.test(areaName)) admin += cost; else service += cost;
+      if (DEPUTY_ADMIN_AREAS.indexOf(areaName.trim().toLowerCase()) !== -1) admin += cost; else service += cost;
     }
     if (rows.length < max) break;
     start += max;
