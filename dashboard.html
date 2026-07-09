@@ -1054,6 +1054,11 @@ function renderBudgetSection(root) {
 
   wrap.appendChild(tbl);
   sec.appendChild(wrap);
+  if (state.budget.debug) {
+    var dbg = el('div', 'm-sub', 'For your AI: months=' + months.length + ' ' + esc(JSON.stringify(state.budget.debug)));
+    dbg.style.fontSize = '10px'; dbg.style.opacity = '0.55'; dbg.style.marginTop = '8px'; dbg.style.wordBreak = 'break-word';
+    sec.appendChild(dbg);
+  }
   root.appendChild(sec);
 }
 
