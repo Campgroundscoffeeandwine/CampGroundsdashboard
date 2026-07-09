@@ -612,7 +612,14 @@ async function xeroBudgetForYear(env, h, year) {
       budget: m.budgetCol != null ? (parseFloat(r.cells[m.budgetCol] && r.cells[m.budgetCol].Value) || 0) : null
     }));
   }
-  return { months, byMonth };
+  const header = rows.find((r) => r.RowType === 'Header');
+  const debug = {
+    reportName: (data.Reports && data.Reports[0] && data.Reports[0].ReportName) || null,
+    topRowTypes: rows.map((r) => r.RowType + (r.Title ? (':' + r.Title) : '')),
+    headerLabels: ((header && header.Cells) || []).map((c) => c.Value),
+    flatRowCount: flat.length
+  };
+  return { months, byMonth, debug };
 }
 
 /* GET /api/budget?month=YYYY-MM -> { month:{label,accounts}, year:{label,accounts} }
@@ -640,7 +647,8 @@ async function apiBudget(env, url) {
     }
     return json({
       month: { label: monthParam, accounts: monthAccounts },
-      year: { label: year, accounts: Object.values(ytd) }
+      year: { label: year, accounts: Object.values(ytd) },
+      debug: yearData.debug
     });
   } catch (err) {
     return json({ error: 'budget fetch failed', plain: plainError(err.status || 500) }, err.status || 500);

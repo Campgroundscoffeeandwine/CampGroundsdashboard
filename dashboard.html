@@ -951,6 +951,9 @@ function renderBudgetSection(root) {
     var accounts = (block && block.accounts) || [];
     if (!accounts.length) {
       var er = el('tr'); var ed = el('td', 'm-sub', 'No budget set in Xero for this period yet.'); ed.colSpan = 4; er.appendChild(ed); tbl.appendChild(er);
+      if (state.budget && state.budget.debug) {
+        var dr = el('tr'); var dd = el('td', 'm-sub', 'For your AI: ' + esc(JSON.stringify(state.budget.debug))); dd.colSpan = 4; dd.style.fontSize = '10px'; dd.style.opacity = '0.6'; dr.appendChild(dd); tbl.appendChild(dr);
+      }
     }
     accounts.forEach(function (a) {
       var tr = el('tr');
