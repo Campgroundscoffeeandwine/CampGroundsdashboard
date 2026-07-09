@@ -1004,11 +1004,6 @@ function renderBudgetSection(root) {
 
   if (!anyAccounts) {
     sec.appendChild(el('div', 'm-sub', 'No budget set in Xero for this financial year yet.'));
-    if (state.budget.debug) {
-      var dd = el('div', 'm-sub', 'For your AI: ' + esc(JSON.stringify(state.budget.debug)));
-      dd.style.fontSize = '10px'; dd.style.opacity = '0.6'; dd.style.marginTop = '6px';
-      sec.appendChild(dd);
-    }
     root.appendChild(sec);
     return;
   }
@@ -1054,11 +1049,6 @@ function renderBudgetSection(root) {
 
   wrap.appendChild(tbl);
   sec.appendChild(wrap);
-  if (state.budget.debug) {
-    var dbg = el('div', 'm-sub', 'For your AI: months=' + months.length + ' ' + esc(JSON.stringify(state.budget.debug)));
-    dbg.style.fontSize = '10px'; dbg.style.opacity = '0.55'; dbg.style.marginTop = '8px'; dbg.style.wordBreak = 'break-word';
-    sec.appendChild(dbg);
-  }
   root.appendChild(sec);
 }
 
