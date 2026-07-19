@@ -245,21 +245,6 @@ body {
 .tbar { cursor: default; }
 .tbar:hover { opacity: 0.78; }
 .mcard.alert { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
-.budget-section { margin-top: 2rem; }
-.section-title { font-family: "Khand", sans-serif; font-size: 20px; font-weight: 700; color: var(--black); margin-bottom: 0.75rem; }
-.budget-table-wrap { margin-bottom: 1.5rem; overflow-x: auto; }
-.budget-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.budget-table th { text-align: left; font-weight: 500; color: var(--muted); padding: 6px 10px; border-bottom: 1px solid rgba(13,13,13,0.1); }
-.budget-table td { padding: 6px 10px; border-bottom: 1px solid rgba(13,13,13,0.06); }
-.budget-table td.num, .budget-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
-.budget-matrix { font-size: 12px; }
-.budget-matrix td.num { color: var(--text); }
-.budget-matrix td.num.dim { color: var(--muted); }
-.budget-section-row td { font-family: 'Khand', sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; color: var(--muted); background: var(--cream2); padding-top: 10px; padding-bottom: 4px; }
-.chart-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; }
-.chart-legend { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
-.chart-legend-row { display: flex; align-items: center; gap: 8px; }
-.chart-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 </style>
 </head>
 <body>
@@ -310,14 +295,14 @@ var TZ_CHOICES = {
   US: ['America/New_York','America/Chicago','America/Denver','America/Phoenix','America/Los_Angeles','Pacific/Honolulu','America/Anchorage']
 };
 var ACCENTS = [
+  { key: 'forest',      c: '#2D6A4F', dim: 'rgba(45,106,79,0.12)' },   /* Camp Grounds brand: forest green */
+  { key: 'burntorange', c: '#CC5500', dim: 'rgba(204,85,0,0.12)' },    /* Camp Grounds brand: burnt orange */
   { key: 'gold',   c: '#F2A900', dim: 'rgba(242,169,0,0.12)' },
   { key: 'teal',   c: '#0E8A6E', dim: 'rgba(14,138,110,0.12)' },
   { key: 'blue',   c: '#1A5FB4', dim: 'rgba(26,95,180,0.12)' },
   { key: 'coral',  c: '#C04B28', dim: 'rgba(192,75,40,0.12)' },
   { key: 'purple', c: '#5C3DB0', dim: 'rgba(92,61,176,0.12)' },
-  { key: 'green',  c: '#1A7A3C', dim: 'rgba(26,122,60,0.12)' },
-  { key: 'forest',      c: '#2D6A4F', dim: 'rgba(45,106,79,0.12)' },   /* Camp Grounds brand: forest green */
-  { key: 'burntorange', c: '#CC5500', dim: 'rgba(204,85,0,0.12)' }    /* Camp Grounds brand: burnt orange */
+  { key: 'green',  c: '#1A7A3C', dim: 'rgba(26,122,60,0.12)' }
 ];
 
 function defaultSettings() {
@@ -327,7 +312,7 @@ function defaultSettings() {
     weekStart: 1,            /* 1 = Monday */
     rolloverHour: 0,         /* sales before this hour count to the previous trading day */
     timezone: TZ_DEFAULTS[KIT_CONFIG.region] || 'Australia/Sydney',
-    accent: 'gold',
+    accent: 'forest',
     dataMode: KIT_CONFIG.startLevel === 'manual' ? 'manual' : 'live',
     targets: { cogs: 30, wage: 30, overheads: 30, profit: 10 }
   };
@@ -503,15 +488,7 @@ var state = {
   loading: false,
   data: null,                  /* last /api/metrics payload */
   fetchedAt: null,
-  fetchError: null,
-  budget: null,                /* last /api/budget payload */
-  budgetFY: null,              /* which financial year start it was fetched for */
-  budgetLoading: false,
-  budgetError: null,
-  weekTracker: null,           /* last /api/weekly payload */
-  weekTrackerKey: null,        /* which from:to range it was fetched for */
-  weekTrackerLoading: false,
-  weekTrackerError: null
+  fetchError: null
 };
 
 function apiUrl(force) {
@@ -620,8 +597,6 @@ function periodValues(slot) {  /* slot: 'cur' | 'prev' | 'yoy' */
   }
   if (pos) out.count = num(pos.count);
   if (ros) out.rosteredCost = num(ros.cost);
-  if (ros) out.rosteredAdminCost = num(ros.adminCost);
-  if (ros) out.rosteredServiceCost = num(ros.serviceCost);
   return out;
 }
 function num(v) { return (typeof v === 'number' && isFinite(v)) ? v : null; }
@@ -913,397 +888,6 @@ function renderDashboard(root) {
   var cur = periodValues('cur'), prev = periodValues('prev'), yoy = periodValues('yoy');
   CHOSEN.forEach(function (k) { grid.appendChild(metricCard(k, cur, prev, yoy, r)); });
   root.appendChild(grid);
-
-  renderTaxSetAside(root, cur, r);
-  renderBudgetSection(root);
-  renderRevenuePie(root);
-  renderAnnualBarChart(root);
-  renderWeeklyTracker(root);
-}
-
-/* ---------- Daily tracker (ADDITIONAL - this week, day by day: revenue
-   from Xero, transaction count from Square, approved labour cost from
-   Deputy's approved timesheets - distinct from the projected roster cost
-   used elsewhere). Always shows the current calendar week regardless of
-   which period the rest of the dashboard is showing. ---------- */
-function singleBarChart(labels, values, color, fmtFn, height) {
-  height = height || 110;
-  var width = 560;
-  var svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, width: '100%' });
-  svg.style.maxWidth = width + 'px'; svg.style.height = height + 'px'; svg.style.display = 'block';
-  var n = labels.length, groupW = width / n, barW = groupW * 0.5, padBottom = 20;
-  var maxV = Math.max.apply(null, values.filter(function (v) { return v != null; }).concat([1]));
-  labels.forEach(function (lab, i) {
-    var gx = i * groupW + groupW / 2;
-    var v = values[i];
-    var h = v != null ? (v / maxV) * (height - padBottom - 8) : 0;
-    var rect = svgEl('rect', { x: gx - barW / 2, y: height - padBottom - h, width: barW, height: Math.max(h, v != null ? 1 : 0), fill: v != null ? color : 'var(--border)' });
-    svgTitle(rect, lab + ': ' + (v != null ? (fmtFn ? fmtFn(v) : v) : 'No data yet'));
-    svg.appendChild(rect);
-    var t = svgEl('text', { x: gx, y: height - 6, 'text-anchor': 'middle', 'font-size': '10', fill: 'var(--muted)' });
-    t.textContent = lab;
-    svg.appendChild(t);
-  });
-  return svg;
-}
-
-function renderWeeklyTracker(root) {
-  if (isManual() || (!isConfigured('accounting') && !isConfigured('pos') && !isConfigured('rostering'))) return;
-  var wk = resolvePeriod('thisWeek', null, null);
-  var fromIso = iso(wk.from), toIso = iso(wk.to);
-  var key = fromIso + ':' + toIso;
-  if (state.weekTrackerKey !== key && !state.weekTrackerLoading) {
-    state.weekTrackerLoading = true; state.weekTrackerKey = key; state.weekTrackerError = null;
-    var q = 'from=' + fromIso + '&to=' + toIso + '&tz=' + encodeURIComponent(SETTINGS.timezone) + '&rollover=' + (+SETTINGS.rolloverHour || 0);
-    fetch('/api/weekly?' + q).then(function (res) {
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.json();
-    }).then(function (j) {
-      state.weekTracker = j; state.weekTrackerLoading = false; render();
-    }).catch(function () {
-      state.weekTrackerLoading = false;
-      state.weekTrackerError = 'Couldn\u2019t fetch the daily tracker just now. Try refresh.';
-      render();
-    });
-  }
-
-  var sec = el('div', 'budget-section');
-  sec.appendChild(el('div', 'section-title', 'This week, day by day'));
-
-  if (state.weekTrackerLoading && !state.weekTracker) {
-    sec.appendChild(el('div', 'm-sub', 'Fetching daily figures\u2026'));
-    root.appendChild(sec);
-    return;
-  }
-  if (state.weekTrackerError && !state.weekTracker) {
-    sec.appendChild(el('div', 'notconf-msg', esc(state.weekTrackerError)));
-    root.appendChild(sec);
-    return;
-  }
-  if (!state.weekTracker || state.weekTrackerKey !== key) { root.appendChild(sec); return; }
-
-  var sub = el('div', 'm-sub', 'Revenue is from Xero (day-level accuracy depends on how your books post daily takings), transactions from Square, approved labour cost from Deputy\u2019s approved timesheets (not the roster). Future days show no data yet.');
-  sub.style.marginBottom = '0.6rem';
-  sec.appendChild(sub);
-
-  var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  var dayLabels = state.weekTracker.days.map(function (d) {
-    var dt = new Date(d + 'T12:00:00Z');
-    return dayNames[dt.getUTCDay()];
-  });
-
-  var tblWrap = el('div', 'budget-table-wrap');
-  var tbl = el('table', 'budget-table');
-  var thead = el('tr');
-  ['Day', 'Revenue (Xero)', 'Transactions (Square)', 'Approved labour (Deputy)'].forEach(function (h) { thead.appendChild(el('th', null, esc(h))); });
-  tbl.appendChild(thead);
-  state.weekTracker.days.forEach(function (d, i) {
-    var tr = el('tr');
-    tr.appendChild(el('td', null, esc(dayLabels[i]) + ' ' + esc(d.slice(5))));
-    var rev = state.weekTracker.revenue[i];
-    var txn = state.weekTracker.transactions[i];
-    var lab = state.weekTracker.labourCost[i];
-    tr.appendChild(el('td', 'num', rev != null ? fmtMoney(rev) : '\u2014'));
-    tr.appendChild(el('td', 'num', txn != null ? txn.toLocaleString() : '\u2014'));
-    tr.appendChild(el('td', 'num', lab != null ? fmtMoney(lab) : '\u2014'));
-    tbl.appendChild(tr);
-  });
-  tblWrap.appendChild(tbl);
-  sec.appendChild(tblWrap);
-
-  if (isConfigured('accounting')) {
-    sec.appendChild(el('div', 'cmp-lab', 'Revenue by day'));
-    sec.appendChild(singleBarChart(dayLabels, state.weekTracker.revenue, 'var(--accent)', fmtMoney));
-  }
-  if (isConfigured('pos')) {
-    sec.appendChild(el('div', 'cmp-lab', 'Transactions by day'));
-    sec.appendChild(singleBarChart(dayLabels, state.weekTracker.transactions, '#1A5FB4', function (v) { return Math.round(v) + ''; }));
-  }
-  if (isConfigured('rostering')) {
-    sec.appendChild(el('div', 'cmp-lab', 'Approved labour cost by day'));
-    sec.appendChild(singleBarChart(dayLabels, state.weekTracker.labourCost, '#C04B28', fmtMoney));
-  }
-
-  root.appendChild(sec);
-}
-
-/* ---------- Charts (additional - hand-rolled SVG, no external library so
-   the single-file dashboard stays self-contained). Both read from the same
-   budget data already fetched for the Budget projection section. ---------- */
-var PIE_COLORS = ['#2D6A4F', '#CC5500', '#F2A900', '#1A5FB4', '#5C3DB0', '#0E8A6E', '#C04B28', '#1A7A3C', '#8C8075', '#40342c'];
-
-function svgEl(tag, attrs) {
-  var n = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  if (attrs) Object.keys(attrs).forEach(function (k) { n.setAttribute(k, attrs[k]); });
-  return n;
-}
-function svgTitle(node, text) {
-  var t = svgEl('title'); t.textContent = text; node.appendChild(t); return node;
-}
-
-function pieChart(data, size) {
-  size = size || 180;
-  var total = data.reduce(function (s, d) { return s + Math.max(0, d.value); }, 0);
-  var svg = svgEl('svg', { viewBox: '0 0 ' + size + ' ' + size, width: size, height: size });
-  var cx = size / 2, cy = size / 2, r = size / 2 - 4, ir = r * 0.55;
-  if (total <= 0) {
-    svg.appendChild(svgEl('circle', { cx: cx, cy: cy, r: r, fill: 'none', stroke: 'var(--border)', 'stroke-width': (r - ir) }));
-    return svg;
-  }
-  var angle = -Math.PI / 2;
-  function pt(a, rad) { return [cx + rad * Math.cos(a), cy + rad * Math.sin(a)]; }
-  data.forEach(function (d) {
-    if (d.value <= 0) return;
-    var frac = d.value / total;
-    var a0 = angle, a1 = angle + frac * Math.PI * 2;
-    angle = a1;
-    var large = (a1 - a0) > Math.PI ? 1 : 0;
-    var p0 = pt(a0, r), p1 = pt(a1, r), p2 = pt(a1, ir), p3 = pt(a0, ir);
-    var dstr = 'M' + p0[0] + ',' + p0[1] + ' A' + r + ',' + r + ' 0 ' + large + ' 1 ' + p1[0] + ',' + p1[1]
-      + ' L' + p2[0] + ',' + p2[1] + ' A' + ir + ',' + ir + ' 0 ' + large + ' 0 ' + p3[0] + ',' + p3[1] + ' Z';
-    var path = svgEl('path', { d: dstr, fill: d.color });
-    svgTitle(path, d.label + ': ' + fmtMoney(d.value) + ' (' + (frac * 100).toFixed(1) + '%)');
-    svg.appendChild(path);
-  });
-  return svg;
-}
-
-function renderRevenuePie(root) {
-  if (!state.budget || !state.budget.sections || !state.budget.months) return;
-  var income = state.budget.sections.filter(function (s) { return s.key === 'income'; })[0];
-  if (!income || !income.accounts.length) return;
-  var mk = monthKey(tradingToday());
-  var idx = state.budget.months.indexOf(mk);
-  if (idx === -1) return;
-  var items = income.accounts.map(function (a, i) {
-    var cell = a.monthly[idx];
-    return { label: a.name, value: (cell && cell.actual) || 0, color: PIE_COLORS[i % PIE_COLORS.length] };
-  }).filter(function (d) { return d.value > 0; }).sort(function (a, b) { return b.value - a.value; });
-  if (!items.length) return;
-
-  var sec = el('div', 'budget-section');
-  sec.appendChild(el('div', 'section-title', 'Revenue by category (' + esc(monthShortLabel(mk)) + ')'));
-  var wrap = el('div', 'chart-row');
-  wrap.appendChild(pieChart(items, 180));
-  var legend = el('div', 'chart-legend');
-  items.forEach(function (d) {
-    var row = el('div', 'chart-legend-row');
-    var sw = el('span', 'chart-swatch'); sw.style.background = d.color;
-    row.appendChild(sw);
-    row.appendChild(el('span', null, esc(d.name || d.label) + ' \u2014 ' + fmtMoney(d.value)));
-    legend.appendChild(row);
-  });
-  wrap.appendChild(legend);
-  sec.appendChild(wrap);
-  root.appendChild(sec);
-}
-
-function barChart(pairs, width, height) {
-  width = width || 520; height = height || 220;
-  var svg = svgEl('svg', { viewBox: '0 0 ' + width + ' ' + height, width: '100%' });
-  svg.style.maxWidth = width + 'px'; svg.style.height = height + 'px'; svg.style.display = 'block';
-  var maxV = Math.max.apply(null, pairs.reduce(function (a, p) { a.push(p.actual, p.budget); return a; }, [1]));
-  var n = pairs.length, groupW = width / n, barW = groupW * 0.26, padBottom = 26;
-  pairs.forEach(function (p, i) {
-    var gx = i * groupW + groupW / 2;
-    var hA = (p.actual / maxV) * (height - padBottom - 10);
-    var hB = (p.budget / maxV) * (height - padBottom - 10);
-    var rA = svgEl('rect', { x: gx - barW - 2, y: height - padBottom - hA, width: barW, height: hA, fill: 'var(--accent)' });
-    svgTitle(rA, p.label + ' actual: ' + fmtMoney(p.actual));
-    svg.appendChild(rA);
-    var rB = svgEl('rect', { x: gx + 2, y: height - padBottom - hB, width: barW, height: hB, fill: 'var(--border-med)' });
-    svgTitle(rB, p.label + ' budget: ' + fmtMoney(p.budget));
-    svg.appendChild(rB);
-    var lab = svgEl('text', { x: gx, y: height - 8, 'text-anchor': 'middle', 'font-size': '11', fill: 'var(--muted)' });
-    lab.textContent = p.label;
-    svg.appendChild(lab);
-  });
-  return svg;
-}
-
-var WAGE_NAME_RE = /wages|salaries|superannuation|super|payroll|annual leave|long service|workcover/i;
-function computeAnnualBuckets() {
-  if (!state.budget || !state.budget.sections) return null;
-  var buckets = {
-    revenue: { actual: 0, budget: 0 }, cogs: { actual: 0, budget: 0 },
-    wages: { actual: 0, budget: 0 }, overheads: { actual: 0, budget: 0 }
-  };
-  state.budget.sections.forEach(function (s) {
-    s.accounts.forEach(function (a) {
-      var isWage = WAGE_NAME_RE.test(a.name || '');
-      (a.monthly || []).forEach(function (m) {
-        if (s.key === 'income') { buckets.revenue.actual += m.actual || 0; buckets.revenue.budget += m.budget || 0; }
-        else if (s.key === 'cos') { buckets.cogs.actual += m.actual || 0; buckets.cogs.budget += m.budget || 0; }
-        else if (s.key === 'opex') {
-          if (isWage) { buckets.wages.actual += m.actual || 0; buckets.wages.budget += m.budget || 0; }
-          else { buckets.overheads.actual += m.actual || 0; buckets.overheads.budget += m.budget || 0; }
-        }
-      });
-    });
-  });
-  return buckets;
-}
-
-function renderAnnualBarChart(root) {
-  var b = computeAnnualBuckets();
-  if (!b) return;
-  var sec = el('div', 'budget-section');
-  sec.appendChild(el('div', 'section-title', 'This financial year so far: actual vs budget'));
-  var legend = el('div', 'm-sub');
-  legend.innerHTML = '<span class="chart-swatch" style="background:var(--accent)"></span>Actual &nbsp; <span class="chart-swatch" style="background:var(--border-med)"></span>Budget';
-  legend.style.marginBottom = '0.5rem';
-  sec.appendChild(legend);
-  sec.appendChild(barChart([
-    { label: 'Revenue', actual: b.revenue.actual, budget: b.revenue.budget },
-    { label: 'COGS', actual: b.cogs.actual, budget: b.cogs.budget },
-    { label: 'Wages', actual: b.wages.actual, budget: b.wages.budget },
-    { label: 'Overheads', actual: b.overheads.actual, budget: b.overheads.budget }
-  ]));
-  root.appendChild(sec);
-}
-
-/* Rough estimate, not a locked kpi-spec metric: what to set aside for BAS
-   and PAYG, scaled to whichever period is on screen. BAS scales with actual
-   revenue for the period; PAYG is the owner's own running average, prorated
-   by the period's length against an average month. This tracks a TARGET to
-   set aside - the dashboard has no bank connection, so it can't see whether
-   the money actually got moved. Rates are set once here; ask your AI to
-   change them if the owner's PAYG average or BAS rate changes. */
-var TAX_SETASIDE = { basRatePct: 10, paygMonthly: 4800 };
-function renderTaxSetAside(root, cur, r) {
-  if (isManual() || !isConfigured('accounting') || cur.revenue == null) return;
-  var days = Math.max(1, Math.round((r.to - r.from) / 86400000) + 1);
-  var monthFactor = days / 30.44;
-  var bas = cur.revenue * (TAX_SETASIDE.basRatePct / 100);
-  var payg = TAX_SETASIDE.paygMonthly * monthFactor;
-  var sec = el('div', 'budget-section');
-  var title = el('div', 'section-title');
-  title.innerHTML = 'Set aside for tax <span class="m-tag tag-proj" style="margin-left:8px">Estimate</span>';
-  sec.appendChild(title);
-  var sub = el('div', 'm-sub', 'A target to put aside for ' + esc(periodLabel().toLowerCase()) + ' - not a live balance, just what to transfer.');
-  sub.style.marginBottom = '0.6rem';
-  sec.appendChild(sub);
-  var wrap = el('div', 'budget-table-wrap');
-  var tbl = el('table', 'budget-table');
-  var thead = el('tr');
-  ['What for', 'Rate', 'Set aside this period'].forEach(function (h) { thead.appendChild(el('th', null, esc(h))); });
-  tbl.appendChild(thead);
-  var r1 = el('tr');
-  r1.appendChild(el('td', null, 'BAS (GST)'));
-  r1.appendChild(el('td', 'num', TAX_SETASIDE.basRatePct + '% of revenue'));
-  r1.appendChild(el('td', 'num', fmtMoney(bas)));
-  tbl.appendChild(r1);
-  var r2 = el('tr');
-  r2.appendChild(el('td', null, 'PAYG withholding'));
-  r2.appendChild(el('td', 'num', fmtMoney(TAX_SETASIDE.paygMonthly) + '/month avg'));
-  r2.appendChild(el('td', 'num', fmtMoney(payg)));
-  tbl.appendChild(r2);
-  var r3 = el('tr');
-  r3.appendChild(el('td', null, el('b', null, 'Total to set aside').outerHTML));
-  r3.appendChild(el('td', 'num', ''));
-  r3.appendChild(el('td', 'num', el('b', null, fmtMoney(bas + payg)).outerHTML));
-  tbl.appendChild(r3);
-  wrap.appendChild(tbl);
-  sec.appendChild(wrap);
-  root.appendChild(sec);
-}
-
-var MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-function monthShortLabel(mk) {
-  var y = mk.slice(0, 4), m = +mk.slice(5, 7);
-  return MONTH_ABBR[m - 1] + ' ' + y.slice(2);
-}
-
-/* ---------- Budget projection (additional section - kpi-spec.md's locked
-   metrics are untouched; this tracks the owner's own Xero budgets across
-   every P&L category, every month of the financial year, with over/under
-   markers). Fetches lazily once per financial year. ---------- */
-function renderBudgetSection(root) {
-  if (isManual() || !isConfigured('accounting')) return;
-  var fyk = monthKey(fyStart(tradingToday()));
-  if (state.budgetFY !== fyk && !state.budgetLoading) {
-    state.budgetLoading = true; state.budgetFY = fyk; state.budgetError = null;
-    fetch('/api/budget?fyStart=' + encodeURIComponent(fyk)).then(function (res) {
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.json();
-    }).then(function (j) {
-      state.budget = j; state.budgetLoading = false; render();
-    }).catch(function () {
-      state.budgetLoading = false;
-      state.budgetError = 'Budget figures couldn\u2019t be fetched just now. Try refresh.';
-      render();
-    });
-  }
-
-  var sec = el('div', 'budget-section');
-  var title = el('div', 'section-title');
-  title.innerHTML = 'Budget projection <span class="m-tag tag-proj" style="margin-left:8px">From your Xero budgets</span>';
-  sec.appendChild(title);
-
-  if (state.budgetLoading && !state.budget) {
-    sec.appendChild(el('div', 'm-sub', 'Fetching your budgets\u2026'));
-    root.appendChild(sec);
-    return;
-  }
-  if (state.budgetError && !state.budget) {
-    sec.appendChild(el('div', 'notconf-msg', esc(state.budgetError)));
-    root.appendChild(sec);
-    return;
-  }
-  if (!state.budget || !state.budget.months) { root.appendChild(sec); return; }
-
-  var months = state.budget.months;
-  var sections = state.budget.sections || [];
-  var anyAccounts = sections.some(function (s) { return s.accounts && s.accounts.length; });
-
-  if (!anyAccounts) {
-    sec.appendChild(el('div', 'm-sub', 'No budget set in Xero for this financial year yet.'));
-    root.appendChild(sec);
-    return;
-  }
-
-  var sub = el('div', 'm-sub', 'Each figure is your actual for that month (compare it straight against Xero). Green means on or under budget, red flags overspend (or under-target revenue) \u2014 hover a figure to see the budget it\u2019s measured against.');
-  sub.style.marginBottom = '0.6rem';
-  sec.appendChild(sub);
-
-  var wrap = el('div', 'budget-table-wrap');
-  var tbl = el('table', 'budget-table budget-matrix');
-  var thead = el('tr');
-  thead.appendChild(el('th', null, 'Category'));
-  months.forEach(function (mo) { thead.appendChild(el('th', 'num', esc(monthShortLabel(mo)))); });
-  tbl.appendChild(thead);
-
-  sections.forEach(function (s) {
-    if (!s.accounts || !s.accounts.length) return;
-    var sr = el('tr', 'budget-section-row');
-    var sc = el('td', null, esc(s.label)); sc.colSpan = months.length + 1;
-    sr.appendChild(sc);
-    tbl.appendChild(sr);
-    s.accounts.forEach(function (a) {
-      var tr = el('tr');
-      tr.appendChild(el('td', null, esc(a.name || '')));
-      (a.monthly || []).forEach(function (cell) {
-        var v = (cell.actual != null && cell.budget != null) ? (cell.actual - cell.budget) : null;
-        var overSpend = v != null && v > 0 && s.key !== 'income';
-        var underEarn = v != null && v < 0 && s.key === 'income';
-        var cls = 'num' + ((overSpend || underEarn) ? ' bad' : (v != null ? ' good' : ' dim'));
-        /* Show the ACTUAL dollar figure - directly comparable to what the
-           owner sees in Xero - not the variance. Colour alone carries the
-           over/under-budget marker the owner asked for. */
-        var shown = cell.actual != null ? fmtMoney(cell.actual) : (cell.budget != null ? '\u2014' : '\u2014');
-        var td = el('td', cls, shown);
-        if (cell.actual != null || cell.budget != null) {
-          td.title = 'Actual ' + (cell.actual != null ? fmtMoney(cell.actual) : '\u2014') + ' \u00b7 Budget ' + (cell.budget != null ? fmtMoney(cell.budget) : '\u2014') + (v != null ? (' \u00b7 Variance ' + fmtMoney(v)) : '');
-        }
-        tr.appendChild(td);
-      });
-      tbl.appendChild(tr);
-    });
-  });
-
-  wrap.appendChild(tbl);
-  sec.appendChild(wrap);
-  root.appendChild(sec);
 }
 
 function periodLabel() {
@@ -1349,11 +933,6 @@ function metricCard(key, cur, prev, yoy, r) {
       var ps = el('div', 'm-sub');
       ps.innerHTML = '<span class="m-tag tag-proj" style="margin:0 6px 0 0">Projected</span>' + pj + '% from ' + esc(P.rostering) + ' roster';
       card.appendChild(ps);
-    }
-    if (key === 'wage' && P.rostering && cur.rosteredAdminCost != null && cur.rosteredServiceCost != null) {
-      var pa = el('div', 'm-sub');
-      pa.innerHTML = '<span class="m-tag tag-proj" style="margin:0 6px 0 0">Projected split</span>Admin $' + Math.round(cur.rosteredAdminCost).toLocaleString() + ' \u00b7 Service $' + Math.round(cur.rosteredServiceCost).toLocaleString();
-      card.appendChild(pa);
     }
 
     /* Meter: target for most metrics, recent-average benchmark for revenue */
